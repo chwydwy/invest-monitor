@@ -1,0 +1,20 @@
+# Python virtual environments
+**/venv/
+
+# Python cache
+**/__pycache__/
+*.pyc
+
+# Secrets / API keys
+dart_monitor/config.json
+news_monitor/config_news.json
+stock_monitor/config_price.json
+
+# Runtime state
+news_monitor/sent_articles.json
+
+# Backups
+*_backup/
+
+# Logs
+*.log
