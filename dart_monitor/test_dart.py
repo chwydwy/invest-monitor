@@ -24,7 +24,7 @@ def get_ai_summary(prompt):
         "Content-Type": "application/json"
     }
     data = {
-        "model": "nvidia/nemotron-3-nano-30b-a3b:free", # 원래 모델로 복구
+        "model": "inclusionai/ling-3.0-flash-fin:free", # 원래 모델로 복구
         "messages": [{"role": "user", "content": prompt}]
     }
     

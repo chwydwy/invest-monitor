@@ -77,7 +77,7 @@ def get_ai_summary(text):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     data = {
-        "model": "nvidia/nemotron-3-nano-30b-a3b:free",
+        "model": "inclusionai/ling-3.0-flash-fin:free",
         "messages": [
             {"role": "system", "content": "너는 주식 뉴스 분석가야. 2~3줄로 핵심 요약해줘. 강조기호 빼고."},
             {"role": "user", "content": f"요약:\n\n{text[:2000]}"}
