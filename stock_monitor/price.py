@@ -3,6 +3,8 @@ import json
 import asyncio
 import datetime
 import os
+import re
+import requests
 from telegram import Bot
 from telegram.ext import Application, CommandHandler
 
@@ -24,18 +26,28 @@ config = load_json(CONFIG_FILE)
 mapping = load_json(MAPPING_FILE)
 sent_alerts = set()
 
-# 시총 데이터 가져오기 (Marcap 컬럼 직접 사용)
+# 네이버 금융 시가총액 조회
 def get_mcap_str(symbol):
+    url = f"https://finance.naver.com/item/main.naver?code={symbol}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://finance.naver.com/"
+    }
     try:
-        df_krx = fdr.StockListing('KRX')
-        row = df_krx[df_krx['Code'] == symbol]
-        if row.empty: return "정보없음"
-        
-        mcap_raw = row['Marcap'].values[0]
-        mcap_trillion = float(mcap_raw) / 10**12
-        return f"{mcap_trillion:.2f}조원"
-    except:
-        return "계산불가"
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        match = re.search(r'<em\s+id="_market_sum"[^>]*>(.*?)</em>', response.text, re.DOTALL)
+        if not match:
+            raise ValueError("시가총액 요소를 찾을 수 없습니다.")
+
+        market_sum = re.sub(r'\s+', ' ', match.group(1)).strip()
+        if not market_sum:
+            raise ValueError("시가총액 값이 비어 있습니다.")
+
+        return f"{market_sum}억원"
+    except Exception as e:
+        print(f"⚠️ 시가총액 조회 실패 ({symbol}): {type(e).__name__}: {e}")
+        return "정보없음"
 
 # 주가 정보 가져오기
 def fetch_stock_info(name):
