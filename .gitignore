@@ -12,6 +12,7 @@ stock_monitor/config_price.json
 
 # Runtime state
 news_monitor/sent_articles.json
+news_monitor/daily_sent_cache.json
 
 # Backups
 *_backup/

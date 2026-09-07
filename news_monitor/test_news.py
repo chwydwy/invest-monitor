@@ -1,115 +1,109 @@
 import json
-import os
-import requests
-import time
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs
 
-# 1. 설정 로드
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config_news.json")
+from news import (
+    MAPPING_FILE,
+    find_similar_sent_article,
+    get_ai_summary,
+    get_article_body,
+    get_latest_news_by_date,
+    load_daily_sent_cache,
+    send_telegram,
+)
 
-with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-    config = json.load(f)
+TEST_MODEL = "minimax/minimax-m3:free"
 
-# 2. OpenRouter AI 요약 함수 (공시 프로그램 방식: 무한 재시도)
-def get_ai_summary(prompt):
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {config['OPENROUTER_API_KEY']}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "inclusionai/ling-3.0-flash-fin:free",
-        "messages": [{"role": "user", "content": prompt}]
-    }
+
+def print_ai_result(company_name, title, body):
+    decision, summary = get_ai_summary(company_name, title, body, model=TEST_MODEL)
+    print(f"AI 판정: {decision}")
+    if decision == "SEND":
+        print(f"AI 요약:\n{summary}")
+    return decision, summary
+
+
+def run_article_test():
+    company_name = input("테스트할 기업명: ").strip()
     try:
-        # 타임아웃 60초 설정
-        response = requests.post(url, headers=headers, json=data, timeout=60)
-        if response.status_code == 200:
-            result = response.json()
-            if 'choices' in result:
-                return result['choices'][0]['message']['content'].strip()
-        elif response.status_code == 429:
-            return "AI_DELAY_RETRY"
-    except Exception as e:
-        print(f"⚠️ AI 호출 에러: {e}")
-    return "AI_DELAY_RETRY"
+        with open(MAPPING_FILE, 'r', encoding='utf-8') as f:
+            mapping = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"❌ 기업 매핑을 읽을 수 없습니다: {type(e).__name__}: {e}")
+        return
 
-# 3. 텔레그램 전송 함수
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{config['TELEGRAM_TOKEN']}/sendMessage"
-    data = {
-        "chat_id": config['CHAT_ID_CHEM'],
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
-    }
-    try:
-        requests.post(url, json=data)
-    except Exception as e:
-        print(f"⚠️ 텔레그램 전송 에러: {e}")
+    company_code = mapping.get(company_name)
+    if not company_code:
+        print(f"❌ 매핑에 없는 기업명입니다: {company_name}")
+        return
 
-# 4. 실행
+    print("🚀 [통합 테스트] 운영 뉴스 수집·중복 검사·AI 판정 시작...")
+    news_list = get_latest_news_by_date(company_code)
+    if not news_list:
+        print("❌ 최근 24시간 이내의 기사를 찾을 수 없습니다.")
+        return
+
+    news = news_list[0]
+    print(f"대상 기업: {company_name}({company_code})")
+    print(f"기사 제목: {news['title']}")
+
+    body, final_link = get_article_body(news['office_id'], news['article_id'])
+    if not body:
+        print("❌ 본문 수집 실패")
+        return
+    print(f"본문 수집 성공: {len(body)}자")
+
+    # 운영 상태는 기록하지 않고, 당일 전송 캐시만 읽기 전용으로 비교한다.
+    duplicate = find_similar_sent_article(news['title'], body, load_daily_sent_cache(prune_expired=False))
+    print(f"유사도 중복 판정: {'중복' if duplicate else '비중복'}")
+    if duplicate:
+        return
+
+    decision, summary = print_ai_result(company_name, news['title'], body)
+    if decision == "NO_SEND":
+        return
+
+    send_choice = input("실제 Telegram 테스트 메시지를 전송할까요? [y/N]: ").strip().lower()
+    if send_choice == 'y':
+        if send_telegram(company_name, news['title'], summary, final_link, test_mode=True):
+            print("✅ [테스트] Telegram 전송 성공")
+        else:
+            print("❌ [테스트] Telegram 전송 실패")
+    else:
+        print("Telegram 전송을 건너뛰었습니다.")
+
+
+def read_article_body():
+    print("기사 본문을 입력하세요. 빈 줄을 입력하면 완료됩니다.")
+    lines = []
+    while True:
+        line = input()
+        if not line:
+            return "\n".join(lines).strip()
+        lines.append(line)
+
+
+def run_manual_ai_test():
+    company_name = input("대상 기업명: ").strip()
+    title = input("기사 제목: ").strip()
+    body = read_article_body()
+    if not company_name or not title or not body:
+        print("❌ 기업명, 제목, 본문을 모두 입력해야 합니다.")
+        return
+
+    print("🚀 [수동 AI 판정 테스트] Telegram 및 운영 기록을 사용하지 않습니다.")
+    print_ai_result(company_name, title, body)
+
+
 def run_final_test():
-    print("🚀 [최종 테스트] 뉴스 수집 및 AI 요약 시작...")
-    code = "014830"
-    list_url = f"https://finance.naver.com/item/news_news.naver?code={code}&page=1"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Referer": f"https://finance.naver.com/item/news.naver?code={code}"
-    }
+    print("1. 실제 네이버 기사 테스트")
+    print("2. 제목/본문 직접 입력 테스트")
+    mode = input("선택 (1/2): ").strip()
+    if mode == '1':
+        run_article_test()
+    elif mode == '2':
+        run_manual_ai_test()
+    else:
+        print("❌ 1 또는 2를 입력하세요.")
 
-    try:
-        # 뉴스 리스트에서 기사 링크 가져오기
-        res = requests.get(list_url, headers=headers)
-        res.encoding = 'euc-kr'
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        title_tag = soup.select_one('td.title a') # 첫 번째 기사
-        if not title_tag:
-            print("❌ 기사 링크를 찾을 수 없습니다.")
-            return
-
-        title = title_tag.get_text(strip=True)
-        f_link = "https://finance.naver.com" + title_tag['href']
-        
-        # 기사 ID 추출하여 원문 URL 조립
-        qs = parse_qs(urlparse(f_link).query)
-        oid, aid = qs.get('office_id',[''])[0], qs.get('article_id',[''])[0]
-        final_url = f"https://n.news.naver.com/mnews/article/{oid}/{aid}"
-        
-        # 본문 추출
-        res_b = requests.get(final_url, headers=headers)
-        soup_b = BeautifulSoup(res_b.text, 'html.parser')
-        content = soup_b.select_one('#newsct_article') or soup_b.select_one('#articleBodyContents')
-        
-        if not content:
-            print("❌ 본문을 추출할 수 없습니다.")
-            return
-        
-        body_text = content.get_text(separator="\n", strip=True)
-        print(f"✅ 기사 확보: {title}")
-
-        # AI 요약 (공시 프로그램의 무한 루프 적용)
-        prompt = f"다음 뉴스 기사를 2~3줄로 핵심 요약해줘. 강조 기호(**)는 빼고 텍스트만 줘:\n\n{body_text[:2000]}"
-        
-        while True:
-            print("🤖 AI 요약 시도 중 (답변 대기)...")
-            summary = get_ai_summary(prompt)
-            if summary == "AI_DELAY_RETRY":
-                print(f"⏳ [{time.strftime('%H:%M:%S')}] AI 지연 발생. 1분 후 재시도...")
-                time.sleep(60)
-                continue
-            break
-        
-        # 텔레그램 전송
-        msg = f"<b>[유니드]</b>\n{title}\n\n{summary}\n\n🔗 <a href='{final_url}'>기사 원문 보기</a>"
-        send_telegram(msg)
-        print("🎉 전송 완료! 텔레그램을 확인하세요.")
-
-    except Exception as e:
-        print(f"❌ 오류 발생: {e}")
 
 if __name__ == "__main__":
     run_final_test()
