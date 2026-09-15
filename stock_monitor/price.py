@@ -28,25 +28,34 @@ sent_alerts = set()
 
 # 네이버 금융 시가총액 조회
 def get_mcap_str(symbol):
-    url = f"https://finance.naver.com/item/main.naver?code={symbol}"
+    url = f"https://m.stock.naver.com/api/stock/{symbol}/integration"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://finance.naver.com/"
+        "Referer": f"https://stock.naver.com/domestic/stock/{symbol}/price"
     }
+    response = None
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        match = re.search(r'<em\s+id="_market_sum"[^>]*>(.*?)</em>', response.text, re.DOTALL)
-        if not match:
-            raise ValueError("시가총액 요소를 찾을 수 없습니다.")
+        total_infos = response.json().get("totalInfos", [])
+        market_value = next(
+            (item.get("value") for item in total_infos if item.get("code") == "marketValue"),
+            None
+        )
+        if not market_value:
+            raise ValueError("marketValue 필드를 찾을 수 없습니다.")
 
-        market_sum = re.sub(r'\s+', ' ', match.group(1)).strip()
-        if not market_sum:
-            raise ValueError("시가총액 값이 비어 있습니다.")
+        market_sum = str(market_value).strip()
+        if market_sum.endswith("억원"):
+            return market_sum
+        if market_sum.endswith("억"):
+            return f"{market_sum}원"
 
         return f"{market_sum}억원"
     except Exception as e:
-        print(f"⚠️ 시가총액 조회 실패 ({symbol}): {type(e).__name__}: {e}")
+        status = response.status_code if response is not None else "N/A"
+        final_url = response.url if response is not None else url
+        print(f"⚠️ 시가총액 조회 실패 ({symbol}): {type(e).__name__}: {e} (status={status}, url={final_url})")
         return "정보없음"
 
 # 주가 정보 가져오기
