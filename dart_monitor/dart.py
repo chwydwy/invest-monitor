@@ -26,7 +26,7 @@ def get_ai_summary(prompt):
         "Content-Type": "application/json"
     }
     data = {
-        "model": "inclusionai/ling-3.0-flash-fin:free",
+        "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
         "messages": [{"role": "user", "content": prompt}]
     }
     try:

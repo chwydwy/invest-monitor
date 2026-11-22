@@ -10,7 +10,7 @@ from news import (
     send_telegram,
 )
 
-TEST_MODEL = "minimax/minimax-m3:free"
+TEST_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 
 def print_ai_result(company_name, title, body):
