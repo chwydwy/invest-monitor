@@ -9,6 +9,7 @@ from urllib import error, request
 
 MAX_BYTES = 65536
 MAX_AI_CHARS = 40000
+DASHBOARD_USER_AGENT = "invest-monitor-dashboard-sender/1.0"
 HOLD_STATES = {"hold_size", "hold_payload", "hold_auth", "conflict"}
 
 
@@ -128,7 +129,8 @@ def deliver_pending(db_path, endpoint, token, limit=50, timeout=10):
                 req = request.Request(endpoint, data=payload_text.encode("utf-8"),
                                       headers={"Authorization": f"Bearer {token}",
                                                "Content-Type": "application/json",
-                                               "Idempotency-Key": event_id}, method="POST")
+                                               "Idempotency-Key": event_id,
+                                               "User-Agent": DASHBOARD_USER_AGENT}, method="POST")
                 status, next_at, reason, state = None, None, None, "pending"
                 retry_after = None
                 try:

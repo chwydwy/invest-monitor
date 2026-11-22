@@ -9,7 +9,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from urllib import request
 
-from dashboard_outbox import counts, deliver_pending, inspect_items, release_auth_holds, release_item
+from dashboard_outbox import DASHBOARD_USER_AGENT, counts, deliver_pending, inspect_items, release_auth_holds, release_item
 
 
 @contextmanager
@@ -65,7 +65,7 @@ def verify_duplicate(db_path, event_id, endpoint, token):
     body = row[0].encode("utf-8")
     req = request.Request(endpoint, data=body, method="POST", headers={
         "Authorization": f"Bearer {token}", "Content-Type": "application/json",
-        "Idempotency-Key": event_id,
+        "Idempotency-Key": event_id, "User-Agent": DASHBOARD_USER_AGENT,
     })
     with request.urlopen(req, timeout=10) as response:
         ack = json.load(response)

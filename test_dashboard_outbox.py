@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from dashboard_outbox import counts, deliver_pending, enqueue, inspect_items, release_item, release_auth_holds
+from dashboard_outbox import DASHBOARD_USER_AGENT, counts, deliver_pending, enqueue, inspect_items, release_item, release_auth_holds
 from dashboard_sender import verify_duplicate, exclusive_lock
 
 
@@ -17,9 +17,11 @@ class Receiver(BaseHTTPRequestHandler):
     calls = 0
     retry_after = None
     seen = set()
+    user_agents = []
 
     def do_POST(self):
         Receiver.calls += 1
+        Receiver.user_agents.append(self.headers.get("User-Agent"))
         event_id = self.headers.get("Idempotency-Key")
         self.rfile.read(int(self.headers["Content-Length"]))
         self.send_response(Receiver.status)
@@ -40,7 +42,7 @@ class OutboxTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.db = str(Path(self.temp.name) / "outbox.sqlite3")
-        Receiver.status, Receiver.calls, Receiver.retry_after, Receiver.seen = 200, 0, None, set()
+        Receiver.status, Receiver.calls, Receiver.retry_after, Receiver.seen, Receiver.user_agents = 200, 0, None, set(), []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -74,6 +76,7 @@ class OutboxTest(unittest.TestCase):
         self.assertEqual(Receiver.calls, 2)
         self.assertEqual(counts(self.db), {"delivered": 2})
         self.assertEqual(verify_duplicate(self.db, "dart:001", self.url, "local-test"), "duplicate")
+        self.assertEqual(Receiver.user_agents, [DASHBOARD_USER_AGENT] * 3)
         self.assertEqual(counts(self.db), {"delivered": 2})
         self.assertIsNone(json.loads(self.row("dart:001")[5])["published_at"])
         self.assertEqual(json.loads(self.row("news:002")[5])["published_at_original"], "2026.11.22 09:00")
