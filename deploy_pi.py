@@ -41,8 +41,7 @@ def command(argv, *, input_text=None, cwd=ROOT, label=None):
                            "origin/main does not match requested commit", "requested commit is not a fast-forward",
                            "change requires an unmapped service", "service not active after deployment",
                            "service reports failure after deployment", "Pi working tree changed after deployment",
-                           "noninteractive restart permission unavailable",
-                           "existing broad passwordless sudo policy"):
+                           "noninteractive restart permission unavailable"):
                 if phrase in result.stderr:
                     reason = " - " + ("SSH authentication unavailable" if phrase == "Permission denied" else phrase)
                     break
@@ -156,8 +155,6 @@ if mode == "check":
     raise SystemExit(0)
 if mode != "apply":
     raise SystemExit("unknown mode")
-if broad_passwordless:
-    raise SystemExit("existing broad passwordless sudo policy; no code applied")
 if any(state != "active" for state in services.values()):
     raise SystemExit("a monitored service is not active; no code applied")
 
@@ -236,8 +233,6 @@ def main(argv=None):
     pi_head = remote_head()
     report = remote("check", pi_head, head)
     print("preflight:", json.dumps(report, sort_keys=True))
-    if report.get("broad_passwordless_sudo"):
-        raise DeployError("existing broad passwordless sudo policy; deployment stopped")
     changes_since_pi = [p for p in git("diff", "--name-only", pi_head, head).splitlines() if p]
     validate_service_scope(changes_since_pi)
     needed = required_restarts([*changes_since_pi, *staged])

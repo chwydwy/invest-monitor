@@ -59,7 +59,7 @@ class DeployPiTest(unittest.TestCase):
             return ""
 
         git.side_effect = fake_git
-        remote.return_value = {"head": OLD, "applied": NEW,
+        remote.return_value = {"head": OLD, "applied": NEW, "broad_passwordless_sudo": True,
                                "restart_authorized": {"dart.service": True, "news.service": True}}
         self.assertEqual(deploy_pi.main(["apply", "--message", "Update news"]), 0)
         self.assertLess(calls.index(("commit", "-m", "Update news")), calls.index(("push", "origin", "main")))
@@ -79,10 +79,9 @@ class DeployPiTest(unittest.TestCase):
     @patch.object(deploy_pi, "remote_head", return_value=OLD)
     @patch.object(deploy_pi, "git")
     @patch.object(deploy_pi, "local_check", return_value=[])
-    def test_existing_broad_sudo_stops_before_push(self, local_check, git, remote_head, remote):
-        git.return_value = NEW
-        with self.assertRaisesRegex(deploy_pi.DeployError, "broad passwordless"):
-            deploy_pi.main(["apply"])
+    def test_existing_broad_sudo_is_reported_not_blocked(self, local_check, git, remote_head, remote):
+        git.side_effect = lambda *args: NEW if args[0] == "rev-parse" else ""
+        self.assertEqual(deploy_pi.main(["check"]), 0)
         self.assertNotIn("push", [call.args[0] for call in git.call_args_list])
 
 
