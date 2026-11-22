@@ -5,8 +5,19 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import requests
 import re
+import sys
 from datetime import datetime
 import disclosure_rules # 규칙 파일 임포트
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dashboard_outbox import enqueue
+
+DASHBOARD_DB = os.environ.get("DASHBOARD_OUTBOX_DB", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dashboard_outbox.sqlite3"))
+
+def queue_dashboard_disclosure(payload):
+    try:
+        enqueue(DASHBOARD_DB, payload)
+    except Exception as exc:
+        print(f"대시보드 대기열 저장 실패: {type(exc).__name__}")
 
 # 1. 설정 및 파일 로드
 with open('config.json', 'r', encoding='utf-8') as f:
@@ -157,6 +168,17 @@ while True:
                             has_no_send = "NO_SEND" in summary_clean
 
                             msg = f"{clean_title}\n\n🤖 AI 분석({score}):\n{summary_clean}\n\n🔗 {link}"
+
+                            if not has_no_send:
+                                queue_dashboard_disclosure({
+                                    "source": "dart", "source_id": rcp_no,
+                                    "receipt_no": rcp_no, "company": title_company,
+                                    "title": clean_title, "disclosure_type": clean_title.split(" - ", 1)[-1] if " - " in clean_title else None,
+                                    "published_at": None, "published_at_original": entry.findtext("pubDate"), "url": link,
+                                    "analysis": summary_clean, "score": int(score),
+                                    "monitor_groups": [group for group, selected in (("JM", is_in_jm), ("ChemHold", is_in_chem), ("BAMK_BL", is_in_bl)) if selected],
+                                    "sector": None,
+                                })
                             
                             if not has_no_send:
                                 if is_in_jm: send_telegram(config['CHAT_ID_JM'], msg)

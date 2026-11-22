@@ -3,10 +3,21 @@ import time
 import os
 import requests
 import re
+import sys
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from dashboard_outbox import enqueue
+
+DASHBOARD_DB = os.environ.get("DASHBOARD_OUTBOX_DB", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dashboard_outbox.sqlite3"))
+
+def queue_dashboard_news(payload):
+    try:
+        enqueue(DASHBOARD_DB, payload)
+    except Exception as exc:
+        print(f"대시보드 대기열 저장 실패: {type(exc).__name__}")
 
 # --- 파일 경로 설정 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -121,7 +132,8 @@ def get_latest_news_by_date(code):
                     'press': press_tag.get_text(strip=True) if press_tag else "알수없음", # [추가]
                     'office_id': oid,
                     'article_id': aid,
-                    'date': article_date
+                    'date': article_date,
+                    'date_raw': date_tag.get_text(strip=True)
                 })
         return news_list
     except:
@@ -302,6 +314,15 @@ def main():
                                 sent_history.append(unique_id)
                                 save_sent_history(sent_history)
                                 continue
+
+                            queue_dashboard_news({
+                                "source": "news", "source_id": unique_id,
+                                "article_id": unique_id, "company": name, "stock_code": code,
+                                "title": news['title'], "press": news['press'],
+                                "published_at": None, "url": final_link,
+                                "published_at_original": news['date_raw'],
+                                "summary": summary, "monitor_groups": ["ChemHold"], "sector": None,
+                            })
 
                             if not send_telegram(name, news['title'], summary, final_link):
                                 print(f"⚠️ 기사 ID를 기록하지 않아 다음 순회에서 재시도합니다: {unique_id}")
