@@ -77,6 +77,18 @@ def validate_service_scope(paths):
             raise DeployError("change requires an unmapped service")
 
 
+def required_restarts(paths):
+    restart = set()
+    for path in paths:
+        if ((path.startswith("dart_monitor/") and path.endswith((".py", ".txt", ".json"))
+             and not path.startswith("dart_monitor/test")) or path == "dashboard_outbox.py"):
+            restart.add("dart.service")
+        if ((path.startswith("news_monitor/") and path.endswith((".py", ".txt", ".json"))
+             and not path.startswith("news_monitor/test")) or path == "dashboard_outbox.py"):
+            restart.add("news.service")
+    return restart
+
+
 def local_check():
     if git("branch", "--show-current") != "main":
         raise DeployError("local branch must be main")
@@ -126,13 +138,16 @@ if head != expected:
     raise SystemExit("Pi HEAD changed since preflight")
 
 services = {}
+restart_authorized = {}
 for unit in ("dart.service", "news.service"):
     state, _ = run("systemctl", "is-active", unit, check=False)
     services[unit] = state
+    permission, permission_status = run("sudo", "-n", "-l", "/usr/bin/systemctl", "restart", unit, check=False)
+    restart_authorized[unit] = permission_status == 0 and "NOPASSWD" in permission
 timer, _ = run("systemctl", "is-enabled", "dashboard-sender.timer", check=False)
 if mode == "check":
     print(json.dumps({"head": head, "branch": "main", "services": services,
-                      "sender_timer": timer}, sort_keys=True))
+                      "sender_timer": timer, "restart_authorized": restart_authorized}, sort_keys=True))
     raise SystemExit(0)
 if mode != "apply":
     raise SystemExit("unknown mode")
@@ -160,8 +175,7 @@ for path in changed:
         restart.add("news.service")
 
 for unit in sorted(restart):
-    permission = run("sudo", "-n", "-l", "/usr/bin/systemctl", "restart", unit)[0]
-    if "NOPASSWD" not in permission:
+    if not restart_authorized[unit]:
         raise SystemExit("noninteractive restart permission unavailable")
 run("git", "merge", "--ff-only", target)
 if run("git", "rev-parse", "HEAD")[0] != target:
@@ -215,9 +229,14 @@ def main(argv=None):
     pi_head = remote_head()
     report = remote("check", pi_head, head)
     print("preflight:", json.dumps(report, sort_keys=True))
+    changes_since_pi = [p for p in git("diff", "--name-only", pi_head, head).splitlines() if p]
+    validate_service_scope(changes_since_pi)
+    needed = required_restarts([*changes_since_pi, *staged])
+    missing = sorted(unit for unit in needed if not report.get("restart_authorized", {}).get(unit, False))
+    if missing:
+        raise DeployError("noninteractive restart permission unavailable for " + ", ".join(missing))
     if args.mode == "check":
         return 0
-    validate_service_scope([p for p in git("diff", "--name-only", pi_head, head).splitlines() if p])
     git("merge-base", "--is-ancestor", pi_head, head)
     origin_line = git("ls-remote", "origin", "refs/heads/main").split()
     if not origin_line or not SHA.fullmatch(origin_line[0]):

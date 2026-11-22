@@ -37,10 +37,10 @@ class DeployPiTest(unittest.TestCase):
     @patch.object(deploy_pi, "git")
     @patch.object(deploy_pi, "local_check", return_value=[])
     def test_check_is_read_only(self, local_check, git, remote_head, remote):
-        git.return_value = NEW
+        git.side_effect = lambda *args: NEW if args[0] == "rev-parse" else ""
         remote.return_value = {"head": OLD, "services": {"dart.service": "active", "news.service": "active"}}
         self.assertEqual(deploy_pi.main(["check"]), 0)
-        self.assertEqual([call.args[0] for call in git.call_args_list], ["rev-parse"])
+        self.assertEqual([call.args[0] for call in git.call_args_list], ["rev-parse", "diff"])
         remote.assert_called_once_with("check", OLD, NEW)
 
     @patch.object(deploy_pi, "remote")
@@ -59,10 +59,21 @@ class DeployPiTest(unittest.TestCase):
             return ""
 
         git.side_effect = fake_git
-        remote.return_value = {"head": OLD, "applied": NEW}
+        remote.return_value = {"head": OLD, "applied": NEW,
+                               "restart_authorized": {"dart.service": True, "news.service": True}}
         self.assertEqual(deploy_pi.main(["apply", "--message", "Update news"]), 0)
         self.assertLess(calls.index(("commit", "-m", "Update news")), calls.index(("push", "origin", "main")))
         self.assertEqual(remote.call_args_list[-1].args, ("apply", OLD, NEW))
+
+    @patch.object(deploy_pi, "remote", return_value={"restart_authorized": {"news.service": False}})
+    @patch.object(deploy_pi, "remote_head", return_value=OLD)
+    @patch.object(deploy_pi, "git")
+    @patch.object(deploy_pi, "local_check", return_value=["news_monitor/news.py"])
+    def test_missing_restart_permission_stops_before_commit(self, local_check, git, remote_head, remote):
+        git.side_effect = lambda *args: NEW if args[0] == "rev-parse" else ""
+        with self.assertRaisesRegex(deploy_pi.DeployError, "restart permission"):
+            deploy_pi.main(["apply", "--message", "Update news"])
+        self.assertNotIn("commit", [call.args[0] for call in git.call_args_list])
 
 
 if __name__ == "__main__":
