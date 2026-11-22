@@ -41,7 +41,8 @@ def command(argv, *, input_text=None, cwd=ROOT, label=None):
                            "origin/main does not match requested commit", "requested commit is not a fast-forward",
                            "change requires an unmapped service", "service not active after deployment",
                            "service reports failure after deployment", "Pi working tree changed after deployment",
-                           "noninteractive restart permission unavailable"):
+                           "noninteractive restart permission unavailable",
+                           "existing broad passwordless sudo policy"):
                 if phrase in result.stderr:
                     reason = " - " + ("SSH authentication unavailable" if phrase == "Permission denied" else phrase)
                     break
@@ -139,18 +140,24 @@ if head != expected:
 
 services = {}
 restart_authorized = {}
+policy, policy_status = run("sudo", "-n", "-l", check=False)
+policy_lines = policy.splitlines() if policy_status == 0 else []
+broad_passwordless = any(re.search(r"\bNOPASSWD:\s*ALL\b", line) for line in policy_lines)
 for unit in ("dart.service", "news.service"):
     state, _ = run("systemctl", "is-active", unit, check=False)
     services[unit] = state
-    permission, permission_status = run("sudo", "-n", "-l", "/usr/bin/systemctl", "restart", unit, check=False)
-    restart_authorized[unit] = permission_status == 0 and "NOPASSWD" in permission
+    exact = "/usr/bin/systemctl restart " + unit
+    restart_authorized[unit] = any("NOPASSWD:" in line and exact in line for line in policy_lines)
 timer, _ = run("systemctl", "is-enabled", "dashboard-sender.timer", check=False)
 if mode == "check":
     print(json.dumps({"head": head, "branch": "main", "services": services,
-                      "sender_timer": timer, "restart_authorized": restart_authorized}, sort_keys=True))
+                      "sender_timer": timer, "restart_authorized": restart_authorized,
+                      "broad_passwordless_sudo": broad_passwordless}, sort_keys=True))
     raise SystemExit(0)
 if mode != "apply":
     raise SystemExit("unknown mode")
+if broad_passwordless:
+    raise SystemExit("existing broad passwordless sudo policy; no code applied")
 if any(state != "active" for state in services.values()):
     raise SystemExit("a monitored service is not active; no code applied")
 
@@ -181,7 +188,7 @@ run("git", "merge", "--ff-only", target)
 if run("git", "rev-parse", "HEAD")[0] != target:
     raise SystemExit("applied commit mismatch")
 for unit in sorted(restart):
-    run("sudo", "-n", "systemctl", "restart", unit)
+    run("sudo", "-n", "/usr/bin/systemctl", "restart", unit)
 for unit in ("dart.service", "news.service"):
     state, _ = run("systemctl", "is-active", unit, check=False)
     services[unit] = state
@@ -229,6 +236,8 @@ def main(argv=None):
     pi_head = remote_head()
     report = remote("check", pi_head, head)
     print("preflight:", json.dumps(report, sort_keys=True))
+    if report.get("broad_passwordless_sudo"):
+        raise DeployError("existing broad passwordless sudo policy; deployment stopped")
     changes_since_pi = [p for p in git("diff", "--name-only", pi_head, head).splitlines() if p]
     validate_service_scope(changes_since_pi)
     needed = required_restarts([*changes_since_pi, *staged])

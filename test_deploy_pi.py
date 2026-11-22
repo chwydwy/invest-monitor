@@ -75,6 +75,16 @@ class DeployPiTest(unittest.TestCase):
             deploy_pi.main(["apply", "--message", "Update news"])
         self.assertNotIn("commit", [call.args[0] for call in git.call_args_list])
 
+    @patch.object(deploy_pi, "remote", return_value={"broad_passwordless_sudo": True})
+    @patch.object(deploy_pi, "remote_head", return_value=OLD)
+    @patch.object(deploy_pi, "git")
+    @patch.object(deploy_pi, "local_check", return_value=[])
+    def test_existing_broad_sudo_stops_before_push(self, local_check, git, remote_head, remote):
+        git.return_value = NEW
+        with self.assertRaisesRegex(deploy_pi.DeployError, "broad passwordless"):
+            deploy_pi.main(["apply"])
+        self.assertNotIn("push", [call.args[0] for call in git.call_args_list])
+
 
 if __name__ == "__main__":
     unittest.main()
