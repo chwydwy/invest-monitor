@@ -1,0 +1,248 @@
+"""Deploy an exact Git commit to the Pi after local and remote checks.
+
+Only explicitly staged files can be committed. The script never stages files,
+changes Pi configuration, touches the outbox, or enables the sender timer.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+HOST = "pi5"
+REMOTE_ROOT = "/home/pi5dart/workspace"
+SHA = re.compile(r"^[0-9a-f]{40}$")
+SECRET_PATHS = {
+    "dart_monitor/config.json", "news_monitor/config_news.json",
+    "stock_monitor/config_price.json", "news_monitor/sent_articles.json",
+    "news_monitor/daily_sent_cache.json",
+}
+SECRET_SUFFIXES = (".sqlite3", ".sqlite3-shm", ".sqlite3-wal", ".db", ".pem", ".key", ".token", ".secret", ".env")
+
+
+class DeployError(RuntimeError):
+    pass
+
+
+def command(argv, *, input_text=None, cwd=ROOT, label=None):
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    result = subprocess.run(argv, input=input_text, text=True, capture_output=True, cwd=cwd, env=env)
+    if result.returncode:
+        reason = ""
+        if label and label.startswith("Pi SSH"):
+            for phrase in ("Permission denied", "Pi has uncommitted changes", "Pi HEAD changed since preflight",
+                           "Pi branch is not main", "a monitored service is not active",
+                           "origin/main does not match requested commit", "requested commit is not a fast-forward",
+                           "change requires an unmapped service", "service not active after deployment",
+                           "service reports failure after deployment", "Pi working tree changed after deployment",
+                           "noninteractive restart permission unavailable"):
+                if phrase in result.stderr:
+                    reason = " - " + ("SSH authentication unavailable" if phrase == "Permission denied" else phrase)
+                    break
+        raise DeployError(f"{label or argv[0]} failed (exit {result.returncode}){reason}")
+    return result.stdout.strip()
+
+
+def git(*args):
+    return command(["git", *args], label="git " + args[0])
+
+
+def is_secret(path):
+    lower = path.lower().replace("\\", "/")
+    name = lower.rsplit("/", 1)[-1]
+    return (lower in SECRET_PATHS or name.startswith(".env") or
+            any(name.endswith(suffix) for suffix in SECRET_SUFFIXES) or
+            "/private/" in f"/{lower}/")
+
+
+def validate_paths(paths):
+    blocked = [path for path in paths if is_secret(path)]
+    if blocked:
+        raise DeployError("secret or runtime paths are staged/tracked; deployment stopped")
+
+
+def validate_service_scope(paths):
+    for path in paths:
+        if path.startswith("stock_monitor/") or path.endswith("requirements.txt"):
+            raise DeployError("change requires an unmapped service or dependency install")
+        if (path.endswith(".py") and not path.startswith(("dart_monitor/", "news_monitor/"))
+                and path not in ("dashboard_outbox.py", "dashboard_sender.py", "deploy_pi.py",
+                                 "test_dashboard_outbox.py", "test_deploy_pi.py")):
+            raise DeployError("change requires an unmapped service")
+
+
+def local_check():
+    if git("branch", "--show-current") != "main":
+        raise DeployError("local branch must be main")
+    changed = git("status", "--porcelain=v1", "--untracked-files=all")
+    if changed:
+        # Work must be explicitly staged before a commit. Unstaged or untracked
+        # files can affect tests but cannot be reproduced from the Git commit.
+        for line in changed.splitlines():
+            if line.startswith("??") or line[1] != " ":
+                raise DeployError("unstaged or untracked local changes; deployment stopped")
+    staged = [p for p in git("diff", "--cached", "--name-only").splitlines() if p]
+    validate_paths(staged)
+    validate_service_scope(staged)
+    tracked = [p for p in git("ls-files").splitlines() if p]
+    validate_paths(tracked)
+    git("diff", "--cached", "--check")
+    command([sys.executable, "-m", "py_compile", "dashboard_outbox.py", "dashboard_sender.py",
+             "dart_monitor/dart.py", "news_monitor/news.py"], label="Python syntax check")
+    command([sys.executable, "-m", "unittest", "test_dashboard_outbox", "-v"], label="local outbox tests")
+    return staged
+
+
+REMOTE_PROGRAM = r'''
+import json, os, re, subprocess, sys
+
+root = "/home/pi5dart/workspace"
+mode, expected, target = sys.argv[1:4]
+if not all(re.fullmatch(r"[0-9a-f]{40}", x) for x in (expected, target)):
+    raise SystemExit("invalid commit identifier")
+
+def run(*args, check=True):
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    p = subprocess.run(args, cwd=root, capture_output=True, text=True, env=env)
+    if check and p.returncode:
+        raise SystemExit("command failed: " + args[0] + " " + args[1])
+    return p.stdout.strip(), p.returncode
+
+if run("id", "-un")[0] != "pi5dart":
+    raise SystemExit("unexpected service account")
+if run("git", "branch", "--show-current")[0] != "main":
+    raise SystemExit("Pi branch is not main")
+if run("git", "status", "--porcelain=v1", "--untracked-files=all")[0]:
+    raise SystemExit("Pi has uncommitted changes")
+head = run("git", "rev-parse", "HEAD")[0]
+if head != expected:
+    raise SystemExit("Pi HEAD changed since preflight")
+
+services = {}
+for unit in ("dart.service", "news.service"):
+    state, _ = run("systemctl", "is-active", unit, check=False)
+    services[unit] = state
+timer, _ = run("systemctl", "is-enabled", "dashboard-sender.timer", check=False)
+if mode == "check":
+    print(json.dumps({"head": head, "branch": "main", "services": services,
+                      "sender_timer": timer}, sort_keys=True))
+    raise SystemExit(0)
+if mode != "apply":
+    raise SystemExit("unknown mode")
+if any(state != "active" for state in services.values()):
+    raise SystemExit("a monitored service is not active; no code applied")
+
+run("git", "fetch", "origin", "main")
+if run("git", "rev-parse", "FETCH_HEAD")[0] != target:
+    raise SystemExit("origin/main does not match requested commit")
+if run("git", "merge-base", "--is-ancestor", head, target, check=False)[1]:
+    raise SystemExit("requested commit is not a fast-forward")
+changed = run("git", "diff", "--name-only", head, target)[0].splitlines()
+if any(path.startswith("stock_monitor/") or path.endswith("requirements.txt") or
+       (path.endswith(".py") and not path.startswith(("dart_monitor/", "news_monitor/"))
+        and path not in ("dashboard_outbox.py", "dashboard_sender.py", "deploy_pi.py", "test_dashboard_outbox.py", "test_deploy_pi.py"))
+       for path in changed):
+    raise SystemExit("change requires an unmapped service; no code applied")
+restart = set()
+for path in changed:
+    if (path.startswith("dart_monitor/") and path.endswith((".py", ".txt", ".json"))
+            and not path.startswith("dart_monitor/test")) or path == "dashboard_outbox.py":
+        restart.add("dart.service")
+    if (path.startswith("news_monitor/") and path.endswith((".py", ".txt", ".json"))
+            and not path.startswith("news_monitor/test")) or path == "dashboard_outbox.py":
+        restart.add("news.service")
+
+for unit in sorted(restart):
+    permission = run("sudo", "-n", "-l", "/usr/bin/systemctl", "restart", unit)[0]
+    if "NOPASSWD" not in permission:
+        raise SystemExit("noninteractive restart permission unavailable")
+run("git", "merge", "--ff-only", target)
+if run("git", "rev-parse", "HEAD")[0] != target:
+    raise SystemExit("applied commit mismatch")
+for unit in sorted(restart):
+    run("sudo", "-n", "systemctl", "restart", unit)
+for unit in ("dart.service", "news.service"):
+    state, _ = run("systemctl", "is-active", unit, check=False)
+    services[unit] = state
+    if state != "active":
+        raise SystemExit("service not active after deployment: " + unit)
+    result = run("systemctl", "show", unit, "--property=Result", "--value")[0]
+    if result != "success":
+        raise SystemExit("service reports failure after deployment: " + unit)
+if run("git", "status", "--porcelain=v1", "--untracked-files=all")[0]:
+    raise SystemExit("Pi working tree changed after deployment")
+print(json.dumps({"previous": head, "applied": target, "restarted": sorted(restart),
+                  "services": services, "sender_timer": timer}, sort_keys=True))
+'''
+
+
+def remote(mode, expected, target):
+    if not SHA.fullmatch(expected) or not SHA.fullmatch(target):
+        raise DeployError("invalid commit identifier")
+    output = command(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", HOST,
+                      "python3", "-", mode, expected, target], input_text=REMOTE_PROGRAM,
+                     label="Pi SSH " + mode)
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError:
+        raise DeployError("Pi returned an invalid deployment report") from None
+
+
+def remote_head():
+    output = command(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", HOST,
+                      "git", "-C", REMOTE_ROOT, "rev-parse", "HEAD"], label="Pi SSH preflight")
+    if not SHA.fullmatch(output):
+        raise DeployError("Pi returned an invalid commit identifier")
+    return output
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Check or deploy an exact Git commit to Pi")
+    parser.add_argument("mode", choices=("check", "apply"))
+    parser.add_argument("--message", help="commit message for explicitly staged files")
+    args = parser.parse_args(argv)
+    staged = local_check()
+    if staged and args.mode == "apply" and not args.message:
+        raise DeployError("staged files require --message")
+    head = git("rev-parse", "HEAD")
+    pi_head = remote_head()
+    report = remote("check", pi_head, head)
+    print("preflight:", json.dumps(report, sort_keys=True))
+    if args.mode == "check":
+        return 0
+    validate_service_scope([p for p in git("diff", "--name-only", pi_head, head).splitlines() if p])
+    git("merge-base", "--is-ancestor", pi_head, head)
+    origin_line = git("ls-remote", "origin", "refs/heads/main").split()
+    if not origin_line or not SHA.fullmatch(origin_line[0]):
+        raise DeployError("origin/main did not return a commit")
+    git("merge-base", "--is-ancestor", origin_line[0], head)
+    if staged:
+        git("commit", "-m", args.message)
+    target = git("rev-parse", "HEAD")
+    # A remote branch that advanced independently must never be overwritten.
+    origin_line = git("ls-remote", "origin", "refs/heads/main").split()
+    if not origin_line or not SHA.fullmatch(origin_line[0]):
+        raise DeployError("origin/main did not return a commit")
+    git("merge-base", "--is-ancestor", origin_line[0], target)
+    git("push", "origin", "main")
+    published = git("ls-remote", "origin", "refs/heads/main").split()[0]
+    if published != target:
+        raise DeployError("published commit differs from requested commit")
+    applied = remote("apply", pi_head, target)
+    print("applied:", json.dumps(applied, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except DeployError as exc:
+        print("deployment stopped:", exc, file=sys.stderr)
+        raise SystemExit(1)
