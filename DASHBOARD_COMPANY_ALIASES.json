@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "display_name_rule": "Use the current KRX listed issue name when verified; preserve legal names and former listed names as aliases. Never rewrite historical event names.",
+  "companies": [
+    {"name": "엘에스일렉트릭", "stock_code": "010120", "legal_name": "엘에스일렉트릭 주식회사", "aliases": ["LSELECTRIC", "LS ELECTRIC", "LS일렉트릭"], "source": "https://kind.krx.co.kr/external/2026/05/14/000825/20260514001826/11013.htm"},
+    {"name": "CJ ENM", "stock_code": "035760", "legal_name": "씨제이이엔엠 주식회사", "aliases": ["CJENM", "씨제이이엔엠"], "source": "https://kind.krx.co.kr/external/2026/03/18/002094/20260318009785/11011.htm"},
+    {"name": "JYP Ent.", "stock_code": "035900", "legal_name": "주식회사 제이와이피엔터테인먼트", "aliases": ["JYPEnt.", "JYP Entertainment", "제이와이피엔터테인먼트"], "source": "https://kind.krx.co.kr/corpdetail/totalinfo.do?isurCd=03590&kisComCd=609790&method=searchTotalInfo&repIsuCd=KR7035900000"},
+    {"name": "NHN KCP", "stock_code": "060250", "legal_name": "엔에이치엔케이씨피 주식회사", "aliases": ["NHNKCP", "엔에이치엔케이씨피", "엔에이치엔한국사이버결제"], "source": "https://kind.krx.co.kr/external/2026/03/18/000745/20260318003749/11011.htm"},
+    {"name": "케이씨씨", "stock_code": "002380", "legal_name": "주식회사 케이씨씨", "aliases": ["KCC"], "source": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"},
+    {"name": "케이티앤지", "stock_code": "033780", "legal_name": "주식회사 케이티앤지", "aliases": ["KT&G"], "source": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"},
+    {"name": "티케이지휴켐스", "stock_code": "069260", "legal_name": "티케이지휴켐스 주식회사", "aliases": ["TKG휴켐스"], "source": "https://kind.krx.co.kr/external/2026/04/02/000633/20260402001442/11011.htm"},
+    {"name": "KG모빌리티플랫폼", "stock_code": "381970", "legal_name": "케이지모빌리티플랫폼 주식회사", "aliases": ["케이카", "KG Mobility Platform", "케이지모빌리티플랫폼"], "source": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"},
+    {"name": "트리니티항공", "stock_code": "091810", "legal_name": "주식회사 트리니티항공", "aliases": ["티웨이항공"], "source": "https://kind.krx.co.kr/external/2026/04/13/000292/20260413000856/68155.htm"}
+  ]
+}
