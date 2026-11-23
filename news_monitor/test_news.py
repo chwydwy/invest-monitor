@@ -2,6 +2,7 @@ import json
 
 from news import (
     MAPPING_FILE,
+    TARGET_LIST_FILE,
     find_similar_sent_article,
     get_ai_summary,
     get_article_body,
@@ -9,6 +10,7 @@ from news import (
     load_daily_sent_cache,
     send_telegram,
 )
+from news_quality import fetch_listed_companies, load_company_names, resolve_article_company
 
 TEST_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
@@ -51,19 +53,35 @@ def run_article_test():
         return
     print(f"본문 수집 성공: {len(body)}자")
 
+    with open(TARGET_LIST_FILE, 'r', encoding='utf-8') as source:
+        targets = [line.strip() for line in source if line.strip()]
+    names = load_company_names()
+    identities = {names.get(name, name): name for name in targets}
+    try:
+        listed = fetch_listed_companies()
+    except Exception as exc:
+        print(f"상장 목록 조회 실패: {type(exc).__name__}")
+        listed = None
+    linked_company, reason = resolve_article_company(
+        company_name, news['title'], body, identities, names, listed)
+    print(f"기업 연결: {linked_company or '제외'} ({reason})")
+    if not linked_company:
+        return
+
     # 운영 상태는 기록하지 않고, 당일 전송 캐시만 읽기 전용으로 비교한다.
-    duplicate = find_similar_sent_article(news['title'], body, load_daily_sent_cache(prune_expired=False))
+    duplicate = find_similar_sent_article(
+        news['title'], body, load_daily_sent_cache(prune_expired=False), linked_company)
     print(f"유사도 중복 판정: {'중복' if duplicate else '비중복'}")
     if duplicate:
         return
 
-    decision, summary = print_ai_result(company_name, news['title'], body)
+    decision, summary = print_ai_result(linked_company, news['title'], body)
     if decision != "SEND":
         return
 
     send_choice = input("실제 Telegram 테스트 메시지를 전송할까요? [y/N]: ").strip().lower()
     if send_choice == 'y':
-        if send_telegram(company_name, news['title'], summary, final_link, test_mode=True):
+        if send_telegram(linked_company, news['title'], summary, final_link, test_mode=True):
             print("✅ [테스트] Telegram 전송 성공")
         else:
             print("❌ [테스트] Telegram 전송 실패")

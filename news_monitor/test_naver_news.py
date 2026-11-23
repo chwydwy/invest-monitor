@@ -52,9 +52,18 @@ class NpayNewsTest(unittest.TestCase):
         rows = parse_stock_news(payload, datetime(2026, 11, 23, 17, 0))
         self.assertEqual([row["id"] for row in rows], ["015_0005357186", "008_0005445162"])
         self.assertEqual(rows[0]["date_raw"], "2026.11.23 17:27")
+        self.assertEqual(rows[0]["npay_datetime_raw"], "202611231727")
+        self.assertEqual(rows[0]["published_at"], "2026-11-23T17:27:00+09:00")
         self.assertEqual(rows[0]["press"], "언론사")
         self.assertEqual(rows[0]["office_id"], "015")
         self.assertEqual(rows[0]["article_id"], "0005357186")
+
+    def test_offset_in_npay_registration_is_preserved(self):
+        payload = {"clusters": [{"items": [{"officeId": "015", "articleId": "1",
+            "title": "기사", "datetime": "2026-11-23T08:27:00Z"}]}]}
+        rows = parse_stock_news(payload, datetime(2026, 11, 23, 17, 0))
+        self.assertEqual(rows[0]["published_at"], "2026-11-23T08:27:00+00:00")
+        self.assertEqual(rows[0]["date_raw"], "2026.11.23 17:27")
 
     def test_missing_clusters_and_cutover_persistence(self):
         with self.assertRaises(ValueError):

@@ -1,8 +1,26 @@
 """Parse Npay stock news and retain a one-time source migration boundary."""
 
 import os
-from datetime import datetime
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+KST = timezone(timedelta(hours=9))
+
+
+def parse_npay_registration(raw_date):
+    """Npay compact local time or an explicitly offset ISO time."""
+    try:
+        if len(raw_date) == 12 and raw_date.isdigit():
+            return datetime.strptime(raw_date, "%Y%m%d%H%M").replace(tzinfo=KST)
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?", raw_date):
+            return None
+        parsed = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=KST)
+        return parsed
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def parse_stock_news(payload, cutoff):
@@ -22,10 +40,10 @@ def parse_stock_news(payload, cutoff):
             title, raw_date = item.get("title"), item.get("datetime")
             if not all(isinstance(value, str) and value for value in (oid, aid, title, raw_date)):
                 continue
-            try:
-                article_date = datetime.strptime(raw_date, "%Y%m%d%H%M")
-            except ValueError:
+            registration = parse_npay_registration(raw_date)
+            if registration is None:
                 continue
+            article_date = registration.astimezone(KST).replace(tzinfo=None)
             unique_id = f"{oid}_{aid}"
             if unique_id in seen or article_date < cutoff:
                 continue
@@ -38,6 +56,8 @@ def parse_stock_news(payload, cutoff):
                 "article_id": aid,
                 "date": article_date,
                 "date_raw": article_date.strftime("%Y.%m.%d %H:%M"),
+                "npay_datetime_raw": raw_date,
+                "published_at": registration.isoformat(timespec="seconds"),
             })
     return sorted(news, key=lambda item: item["date"], reverse=True)
 
