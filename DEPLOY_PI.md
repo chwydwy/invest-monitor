@@ -8,6 +8,8 @@
 
 `ai-pipeline.json`·`ai_pipeline_settings.json`은 비밀/개인 운영 설정으로 Git과 배포에서 제외한다. 예산 baseline은 전환 당일 이전 사용량을 모르더라도 0으로 취급하지 않도록 AI DB metadata에 저장하며 다음 UTC 날짜에는 자동 적용되지 않는다.
 
+2026-11-23 전환 완료: 구현 커밋 `58a506c`, 새 다섯 역할 enabled·active, 구 dart/news disabled·inactive, 기존 dashboard timer enabled·active를 확인했다. 확대 기준은 22:02:44 KST이며 당일 잔여 자체 AI 예산은 보수적으로 0, 다음 UTC 자정(2026-11-24 09:00 KST)에 재개한다. 이후 일반 배포는 `--transition` 없이 실행한다. 실제 자연 이벤트의 새 경로 종단 성공은 아직 확인하지 못했다. 아래 구 서비스 관련 설명은 전환 전 이력으로 읽고 현재 상태는 이 절과 AI_PIPELINE_LOCAL_DRAFT.md를 우선한다.
+
 ## 뉴스 소스 전환 (2026-11-23)
 
 기존 네이버 금융 뉴스 목록은 HTTP 410을 반환한다. 뉴스 모니터는 Npay 종목 뉴스 JSON을 읽고 기존 `언론사ID_기사ID` 형식과 24시간·제목·본문·AI·Telegram 판단을 유지한다. 첫 재시작 때 `/home/pi5dart/.local/state/invest-monitor/news-npay-cutover.txt`에 시작 시각을 한 번 기록하고 그 이전 뉴스는 처리 이력에 추가하지 않은 채 건너뛴다. 이전 소스가 중단된 동안 쌓인 기사를 대량 전송하지 않기 위한 경계다. 이 파일은 Git 작업공간과 운영 `sent_articles.json` 밖에 있으며, 이후 재시작에도 같은 경계를 사용한다. 임의로 삭제하면 과거 24시간 기사가 다시 대상이 될 수 있다. 날짜를 특정 시간대로 단정하지 않고 Npay 원본의 시간대 없는 시각과 Pi 현지 시각을 기존 방식대로 비교한다.

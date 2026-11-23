@@ -1,6 +1,6 @@
-# 공통 AI 처리 전환 — 로컬 연결 완료, 운영 미적용
+# 공통 AI 처리 전환 — 운영 적용 및 검증 기록
 
-2026-11-23. 이 문서가 이전 기반 모듈 초안의 미완료 목록을 대체한다. 로컬 검증 후 사용자의 운영 전환 승인을 받아 적용을 진행한다. 실제 시험용 AI 호출·가상 메시지 발송은 하지 않는다.
+2026-11-23. 이 문서가 이전 기반 모듈 초안의 미완료 목록을 대체한다. 로컬 검증 후 사용자의 승인을 받아 운영에 적용했다. 실제 시험용 AI 호출·가상 메시지 발송은 하지 않았다.
 
 ## 실제 연결된 경로
 
@@ -41,7 +41,7 @@ jobs 원본 ID 및 원문 URL 중복을 차단하고 본문 추출도 동일 기
 
 DART는 첫 시작 때 기존 RSS 항목을 건너뛰는 정책을 유지하되 이후 마지막 RSS 링크를 영속 보존한다. 재시작 후에도 피드에 남은 구간은 다시 비교할 수 있다. 이전 링크가 RSS에서 사라지면 gap을 기록하며 과거 DART 목록을 자동 대량 조회하지 않는다. 현재 queue 밖의 과거 공시 복구는 별도 작업이다.
 
-## 설정 및 Pi 전환 명령(준비만, 이번에 실행하지 않음)
+## 설정 및 Pi 전환 절차
 
 `ai_pipeline_settings.example.json`은 enabled=false이며 실제 적용 시각을 넣어야 한다. API 키는 넣지 않고 기존 비밀 설정 파일을 런타임에서 읽는다. `ai_db`는 기존 dashboard DB와 다른 영속 경로여야 한다. 예시 `/home/pi5dart/.local/state/invest-monitor/analysis.sqlite3`의 부모 디렉터리는 서비스 계정 소유 700, DB 생성은 UMask=0077을 사용한다. 운영 설정은 `/home/pi5dart/.config/invest-monitor/ai-pipeline.json`에 600으로 설치하고 Git에 넣지 않는다.
 
@@ -69,3 +69,14 @@ DART는 첫 시작 때 기존 RSS 항목을 건너뛰는 정책을 유지하되 
 오늘 이전 경로의 전체 요청 시도를 정확히 복원할 수 없으므로 2026-11-23 UTC 자체 예산은 뉴스600/공시200/재시도100을 이미 사용한 것으로 보수 반영한다. 이는 실제 사용량의 주장이나 OpenRouter 할당량 변경이 아니다. 당일 새 AI 잔여는 0이며 2026-11-24 09:00 KST(00:00 UTC)에 정상 일일 예산으로 돌아간다. 수집·본문·대기열 저장은 계속 가능하다.
 
 영문 포함 종목코드 호환: 전체 목록의 삼성에피스홀딩스 `0126Z0`는 현재 수신 계약의 숫자 코드 제한에 맞춰 stock_code=null과 stock_code_original 원본 보존 방식으로 전달한다. 기업명 매칭으로 기존 카탈로그 연결을 유지한다. 자세한 수신측 설명은 DASHBOARD_HANDOFF.md에 기록했다.
+
+## 실제 운영 적용 확인
+
+- 구현 적용 커밋: `58a506cd714bfb133e6a4c57057e1c4718bc0f5d` (이후 문서 기록만 별도 갱신 가능).
+- 확대 시작: **2026-11-23 22:02:44 +09:00**. 설정은 `/home/pi5dart/.config/invest-monitor/ai-pipeline.json`(600), AI DB는 `/home/pi5dart/.local/state/invest-monitor/analysis.sqlite3`(600), 상위 state 디렉터리 700.
+- `monitor-pipeline@dart/news/preprocess/ai/deliver.service` 다섯 역할이 pi5dart 계정으로 모두 enabled·active, Result=success. 기존 dart.service/news.service는 inactive·disabled. 실제 재부팅은 하지 않았다.
+- 기존 dashboard-sender.timer는 enabled·active를 유지했다. 새 deliver는 같은 `/home/pi5dart/workspace/dashboard_outbox.sqlite3`에 **인계만** 하고 기존 sender가 외부 HTTP를 처리하므로 외부 송신 역할을 중복 실행하지 않는다.
+- 실제 원본 유니버스 349개, 화학지주 35개 확인. news는 전환 당시 22시 이후이므로 운영시간 밖 inactive 상태로 대기하며 다음 평일 06시에 조회를 시작한다. dart는 RSS 조회를 한 차례 수행했고 새 대상 없이 collected 상태로 종료 후 기존 시간외 1시간 대기를 유지했다.
+- 자연 발견/AI job/전송 의도는 관찰 구간 0건, 새 AI 시도 0건. 오늘 잔여 예산은 baseline 반영으로 모든 구간 0이다. 따라서 실제 SEND/NO_SEND·방별 전송·등록시각·429 동작의 새 운영 경로 검증은 아직 미완료다. 테스트 이벤트나 과거 기사를 보내지 않았다. 새 역할 로그에 오류 타입은 관찰되지 않았다.
+- `deploy_pi.py check`가 새 서비스 구성을 인식하고 다섯 역할 active·재시작 권한과 기존 timer enabled를 확인했다. 관리 권한은 확대하지 않았다.
+- 복구 백업 manifest에 이전/적용 커밋, 확대 시작·DB·unit 경로·예산 재개 시각을 기록했다. 초기 백업 시 잘못된 SQLite URI 때문에 생긴 빈 파일은 backup 폴더에 격리했고 실제 운영 DB는 올바른 읽기 전용 URI와 backup API로 재복사해 integrity_check=ok를 확인했다. 운영 DB는 변경하지 않았다.
