@@ -1,5 +1,11 @@
 # Research Workspace 대시보드 전달 계약 (로컬 준비)
 
+## 공통 AI 처리 전환 추가사항 (2026-11-23, 로컬 연결 완료·미배포)
+
+전체 349개 뉴스 수집과 공통 AI 대기열 전환은 `AI_PIPELINE_LOCAL_DRAFT.md`의 최신 실행 절차를 따른다. 새 AI DB의 dashboard 목적지 완료는 기존 대시보드 SQLite에 인계됐다는 의미이며, 외부 stored/duplicate 확인은 계속 기존 `dashboard_sender.py`가 담당한다. 인증·event_id·stored/duplicate 계약은 변경하지 않는다. 화학지주 외 뉴스는 대시보드에만 전달하고 Telegram 방을 추가하지 않는다.
+
+현재 전체 목록에는 삼성에피스홀딩스의 영문 포함 코드 `0126Z0`도 있다. 기존 Worker는 `stock_code`를 숫자 6자리로 제한하므로, 송신은 이런 경우 `stock_code=null`, `stock_code_original="0126Z0"`로 실제 코드를 보존하고 확인된 기업명으로 기존 대시보드 기업 카탈로그에 매칭한다. 없는 숫자 코드를 만들어내지 않는다. 추후 수신 검증을 영숫자 6자리로 확장하면 정식 stock_code 필드로 옮길 수 있으나 기존 이벤트를 자동 수정하거나 재전송하지 않는다.
+
 현재 코드는 분석 결과를 `dashboard_outbox.sqlite3`에 기록할 뿐 외부로 보내지 않는다. `deliver_pending()`은 별도 실행자에서 명시적으로 호출할 때만 전송한다. Pi 적용·Worker URL·인증키 설정·재시도 실행자 배치는 별도 단계다.
 
 `dashboard_sender.py`는 별도 일회성 실행자다. `--status`는 상태별 건수, `--holds`는 본문 없는 보류 메타데이터를 표시한다. `--once`는 최대 `--limit`건(기본 5건)의 전송 가능 항목만 처리한다. `--verify-duplicate <event_id>`는 이미 delivered인 **실제** 이벤트 한 건을 명시적으로 다시 보내 `duplicate` 응답을 확인한다. `--release <event_id>`와 `--release-auth`는 원인 해결 후 수동 해제에만 사용한다. `.lock` 파일 잠금으로 동시 실행을 막는다. 실행자는 토큰을 명령줄 인자나 로그에서 받지 않고, `--token-file` 또는 `DASHBOARD_TOKEN_FILE`이 가리키는 서비스 계정 전용 파일에서 읽는다. Linux에서 이 파일은 소유자만 접근 가능해야 한다. URL은 `--endpoint` 또는 `DASHBOARD_INGEST_URL`에서 받으며 운영에서는 HTTPS만 사용한다.

@@ -21,6 +21,7 @@ SECRET_PATHS = {
     "dart_monitor/config.json", "news_monitor/config_news.json",
     "stock_monitor/config_price.json", "news_monitor/sent_articles.json",
     "news_monitor/daily_sent_cache.json",
+    "ai-pipeline.json", "ai_pipeline_settings.json",
 }
 SECRET_SUFFIXES = (".sqlite3", ".sqlite3-shm", ".sqlite3-wal", ".db", ".pem", ".key", ".token", ".secret", ".env")
 
@@ -73,11 +74,18 @@ def validate_service_scope(paths):
             raise DeployError("change requires an unmapped service or dependency install")
         if (path.endswith(".py") and not path.startswith(("dart_monitor/", "news_monitor/"))
                 and path not in ("dashboard_outbox.py", "dashboard_sender.py", "deploy_pi.py",
-                                 "test_dashboard_outbox.py", "test_deploy_pi.py", "test_disclosure_targets.py")):
+                                 "test_dashboard_outbox.py", "test_deploy_pi.py", "test_disclosure_targets.py",
+                                 "ai_pipeline.py", "ai_worker.py", "ai_pipeline_cli.py", "news_scan.py", "pipeline_runtime.py",
+                                 "test_ai_pipeline.py", "test_pipeline_integration.py")):
             raise DeployError("change requires an unmapped service")
 
 
-def required_restarts(paths):
+def required_restarts(paths, pipeline=False):
+    if pipeline:
+        changed = [p for p in paths if not p.rsplit("/",1)[-1].startswith("test_")]
+        if any(p.endswith((".py", ".txt", ".json")) and (p.startswith(("dart_monitor/", "news_monitor/")) or p in ("ai_pipeline.py", "ai_worker.py", "news_scan.py", "pipeline_runtime.py", "DASHBOARD_COMPANIES.json", "DASHBOARD_COMPANY_ALIASES.json")) for p in changed):
+            return {"monitor-pipeline@" + role + ".service" for role in ("dart","news","preprocess","ai","deliver")}
+        return {"monitor-pipeline@deliver.service"} if "dashboard_outbox.py" in paths else set()
     restart = set()
     for path in paths:
         if ((path.startswith("dart_monitor/") and path.endswith((".py", ".txt", ".json"))
@@ -107,13 +115,14 @@ def local_check():
     git("diff", "--cached", "--check")
     command([sys.executable, "-m", "py_compile", "dashboard_outbox.py", "dashboard_sender.py",
              "dart_monitor/dart.py", "news_monitor/news.py"], label="Python syntax check")
-    command([sys.executable, "-m", "unittest", "test_dashboard_outbox", "-v"], label="local outbox tests")
+    command([sys.executable, "-m", "unittest", "test_dashboard_outbox", "test_ai_pipeline", "test_pipeline_integration", "news_monitor.test_news_quality", "news_monitor.test_naver_news", "test_deploy_pi", "-q"], label="local outbox tests")
     command([sys.executable, "-m", "unittest", "test_disclosure_targets", "-v"], label="local disclosure target tests")
     return staged
 
 
 REMOTE_PROGRAM = r'''
 import json, os, re, subprocess, sys
+from pathlib import Path
 
 root = "/home/pi5dart/workspace"
 mode, expected, target = sys.argv[1:4]
@@ -143,20 +152,24 @@ restart_authorized = {}
 policy, policy_status = run("sudo", "-n", "-l", check=False)
 policy_lines = policy.splitlines() if policy_status == 0 else []
 broad_passwordless = any(re.search(r"\bNOPASSWD:\s*ALL\b", line) for line in policy_lines)
-for unit in ("dart.service", "news.service"):
+pipeline = run("systemctl", "is-enabled", "monitor-pipeline@ai.service", check=False)[0] == "enabled"
+units = tuple("monitor-pipeline@" + role + ".service" for role in ("dart","news","preprocess","ai","deliver")) if pipeline else ("dart.service", "news.service")
+for unit in units:
     state, _ = run("systemctl", "is-active", unit, check=False)
     services[unit] = state
     exact = "/usr/bin/systemctl restart " + unit
-    restart_authorized[unit] = any("NOPASSWD:" in line and exact in line for line in policy_lines)
+    restart_authorized[unit] = broad_passwordless or run("sudo", "-n", "-l", "/usr/bin/systemctl", "restart", unit, check=False)[1] == 0 or any("NOPASSWD:" in line and exact in line for line in policy_lines)
 timer, _ = run("systemctl", "is-enabled", "dashboard-sender.timer", check=False)
 if mode == "check":
-    print(json.dumps({"head": head, "branch": "main", "services": services,
+    print(json.dumps({"head": head, "branch": "main", "pipeline": pipeline, "services": services,
                       "sender_timer": timer, "restart_authorized": restart_authorized,
                       "broad_passwordless_sudo": broad_passwordless}, sort_keys=True))
     raise SystemExit(0)
-if mode != "apply":
+if mode not in ("apply", "transition"):
     raise SystemExit("unknown mode")
-if any(state != "active" for state in services.values()):
+if mode == "transition" and any(state == "active" for state in services.values()):
+    raise SystemExit("transition requires old services stopped")
+if mode == "apply" and any(state != "active" for state in services.values()):
     raise SystemExit("a monitored service is not active; no code applied")
 
 run("git", "fetch", "origin", "main")
@@ -167,17 +180,27 @@ if run("git", "merge-base", "--is-ancestor", head, target, check=False)[1]:
 changed = run("git", "diff", "--name-only", head, target)[0].splitlines()
 if any(path.startswith("stock_monitor/") or path.endswith("requirements.txt") or
        (path.endswith(".py") and not path.startswith(("dart_monitor/", "news_monitor/"))
-        and path not in ("dashboard_outbox.py", "dashboard_sender.py", "deploy_pi.py", "test_dashboard_outbox.py", "test_deploy_pi.py", "test_disclosure_targets.py"))
+        and path not in ("dashboard_outbox.py", "dashboard_sender.py", "deploy_pi.py", "test_dashboard_outbox.py", "test_deploy_pi.py", "test_disclosure_targets.py",
+                                 "ai_pipeline.py", "ai_worker.py", "ai_pipeline_cli.py", "news_scan.py", "pipeline_runtime.py",
+                                 "test_ai_pipeline.py", "test_pipeline_integration.py"))
        for path in changed):
     raise SystemExit("change requires an unmapped service; no code applied")
-restart = set()
-for path in changed:
-    if (path.startswith("dart_monitor/") and path.endswith((".py", ".txt", ".json"))
-            and not path.startswith("dart_monitor/test")) or path == "dashboard_outbox.py":
-        restart.add("dart.service")
-    if (path.startswith("news_monitor/") and path.endswith((".py", ".txt", ".json"))
-            and not path.startswith("news_monitor/test")) or path == "dashboard_outbox.py":
-        restart.add("news.service")
+def required_restarts(paths, pipeline=False):
+    if pipeline:
+        changed = [p for p in paths if not p.rsplit("/",1)[-1].startswith("test_")]
+        if any(p.endswith((".py", ".txt", ".json")) and (p.startswith(("dart_monitor/", "news_monitor/")) or p in ("ai_pipeline.py", "ai_worker.py", "news_scan.py", "pipeline_runtime.py", "DASHBOARD_COMPANIES.json", "DASHBOARD_COMPANY_ALIASES.json")) for p in changed):
+            return {"monitor-pipeline@" + role + ".service" for role in ("dart","news","preprocess","ai","deliver")}
+        return {"monitor-pipeline@deliver.service"} if "dashboard_outbox.py" in paths else set()
+    restart = set()
+    for path in paths:
+        if ((path.startswith("dart_monitor/") and path.endswith((".py", ".txt", ".json"))
+             and not path.startswith("dart_monitor/test")) or path == "dashboard_outbox.py"):
+            restart.add("dart.service")
+        if ((path.startswith("news_monitor/") and path.endswith((".py", ".txt", ".json"))
+             and not path.startswith("news_monitor/test")) or path == "dashboard_outbox.py"):
+            restart.add("news.service")
+    return restart
+restart = set() if mode == "transition" else required_restarts(changed,pipeline)
 
 for unit in sorted(restart):
     if not restart_authorized[unit]:
@@ -187,7 +210,7 @@ if run("git", "rev-parse", "HEAD")[0] != target:
     raise SystemExit("applied commit mismatch")
 for unit in sorted(restart):
     run("sudo", "-n", "/usr/bin/systemctl", "restart", unit)
-for unit in ("dart.service", "news.service"):
+for unit in (() if mode == "transition" else units):
     state, _ = run("systemctl", "is-active", unit, check=False)
     services[unit] = state
     if state != "active":
@@ -225,6 +248,7 @@ def remote_head():
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Check or deploy an exact Git commit to Pi")
     parser.add_argument("mode", choices=("check", "apply"))
+    parser.add_argument("--transition", action="store_true", help="apply code only after old services are stopped; install roles separately")
     parser.add_argument("--message", help="commit message for explicitly staged files")
     args = parser.parse_args(argv)
     staged = local_check()
@@ -236,7 +260,7 @@ def main(argv=None):
     print("preflight:", json.dumps(report, sort_keys=True))
     changes_since_pi = [p for p in git("diff", "--name-only", pi_head, head).splitlines() if p]
     validate_service_scope(changes_since_pi)
-    needed = required_restarts([*changes_since_pi, *staged])
+    needed = set() if args.transition else required_restarts([*changes_since_pi, *staged],report.get("pipeline",False))
     missing = sorted(unit for unit in needed if not report.get("restart_authorized", {}).get(unit, False))
     if missing:
         raise DeployError("noninteractive restart permission unavailable for " + ", ".join(missing))
@@ -259,7 +283,7 @@ def main(argv=None):
     published = git("ls-remote", "origin", "refs/heads/main").split()[0]
     if published != target:
         raise DeployError("published commit differs from requested commit")
-    applied = remote("apply", pi_head, target)
+    applied = remote("transition" if args.transition else "apply", pi_head, target)
     print("applied:", json.dumps(applied, sort_keys=True))
     return 0
 

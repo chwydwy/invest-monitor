@@ -91,34 +91,21 @@ class NpayNewsTest(unittest.TestCase):
                     "title": "기사", "officeName": "언론사", "datetime": "202611231727",
                 }]}]}
 
-        with patch.object(module.requests, "get", return_value=Response()) as get:
+        with patch.object(module.requests, "get", return_value=Response()) as get, patch.object(module, 'datetime') as clock:
+            clock.now.return_value=datetime(2026,11,23,18,0)
             rows = module.get_latest_news_by_date("051910", datetime(2026, 11, 23, 17, 0))
         self.assertEqual(rows[0]["id"], "015_0005357186")
         self.assertEqual(get.call_args.kwargs["params"]["itemCode"], "051910")
         self.assertEqual(get.call_args.args[0], "https://stock.naver.com/api/domestic/detail/news")
 
-    def test_ai_permanent_error_stops_without_marking_an_article(self):
+
+
+    def test_direct_ai_path_is_disabled(self):
         module = self.news_module()
-
-        class Response:
-            status_code = 404
-
-        with patch.object(module.requests, "post", return_value=Response()) as post, patch.object(module.time, "sleep") as sleep:
-            decision, summary = module.get_ai_summary("회사", "제목", "본문")
-        self.assertEqual((decision, summary), (None, ""))
-        self.assertEqual(post.call_count, 1)
-        sleep.assert_not_called()
-
-    def test_ai_rate_limit_is_bounded(self):
-        module = self.news_module()
-
-        class Response:
-            status_code = 429
-
-        with patch.object(module.requests, "post", return_value=Response()) as post, patch.object(module.time, "sleep") as sleep:
-            self.assertEqual(module.get_ai_summary("회사", "제목", "본문"), (None, ""))
-        self.assertEqual(post.call_count, 3)
-        self.assertEqual(sleep.call_count, 2)
+        with patch.object(module.requests, 'post') as post:
+            with self.assertRaises(RuntimeError):
+                module.get_ai_summary('회사', '제목', '본문')
+        post.assert_not_called()
 
 
 if __name__ == "__main__":

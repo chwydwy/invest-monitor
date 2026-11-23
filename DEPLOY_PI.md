@@ -1,5 +1,13 @@
 # Pi 배포 도구
 
+## 공통 AI 서비스 전환 이후
+
+`deploy_pi.py check/apply`는 Pi에서 `monitor-pipeline@ai.service`가 enabled이면 새 다섯 역할 서비스를 관리한다. 공통 runtime·AI·본문·목록·판단 코드나 기업 목록이 바뀌면 캐시된 설정과 import를 사용하는 다섯 역할을 재시작한다. dashboard_outbox만 바뀌면 deliver만 재시작한다. 테스트·문서 변경은 재시작하지 않는다. 기존 dashboard-sender.timer는 계속 상태 조회만 하고 켜거나 끄지 않는다. sudo 권한을 자동 수정하지 않는다.
+
+최초 전환에만 `apply --transition --message <설명>`을 쓴다. 이 모드는 구 두 서비스가 이미 중단돼 있어야 적용하며 코드만 fast-forward하고 어느 서비스도 재시작하지 않는다. 이어서 승인된 별도 설치 절차로 설정과 template unit을 설치한다. 일반 배포에는 --transition을 쓰지 않는다. 적용 커밋·기존 운영 DB·서비스 계정은 그대로 검증한다. 로컬 게이트는 공통 파이프라인과 기존 대시보드/배포 회귀 테스트를 포함한다.
+
+`ai-pipeline.json`·`ai_pipeline_settings.json`은 비밀/개인 운영 설정으로 Git과 배포에서 제외한다. 예산 baseline은 전환 당일 이전 사용량을 모르더라도 0으로 취급하지 않도록 AI DB metadata에 저장하며 다음 UTC 날짜에는 자동 적용되지 않는다.
+
 ## 뉴스 소스 전환 (2026-11-23)
 
 기존 네이버 금융 뉴스 목록은 HTTP 410을 반환한다. 뉴스 모니터는 Npay 종목 뉴스 JSON을 읽고 기존 `언론사ID_기사ID` 형식과 24시간·제목·본문·AI·Telegram 판단을 유지한다. 첫 재시작 때 `/home/pi5dart/.local/state/invest-monitor/news-npay-cutover.txt`에 시작 시각을 한 번 기록하고 그 이전 뉴스는 처리 이력에 추가하지 않은 채 건너뛴다. 이전 소스가 중단된 동안 쌓인 기사를 대량 전송하지 않기 위한 경계다. 이 파일은 Git 작업공간과 운영 `sent_articles.json` 밖에 있으며, 이후 재시작에도 같은 경계를 사용한다. 임의로 삭제하면 과거 24시간 기사가 다시 대상이 될 수 있다. 날짜를 특정 시간대로 단정하지 않고 Npay 원본의 시간대 없는 시각과 Pi 현지 시각을 기존 방식대로 비교한다.

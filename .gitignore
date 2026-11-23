@@ -20,6 +20,8 @@ news_monitor/daily_sent_cache.json
 *.lock
 *.secret
 *.token
+ai-pipeline.json
+ai_pipeline_settings.json
 
 # Backups
 *_backup/

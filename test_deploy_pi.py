@@ -9,6 +9,14 @@ NEW = "b" * 40
 
 
 class DeployPiTest(unittest.TestCase):
+    def test_pipeline_restart_mapping(self):
+        expected={'monitor-pipeline@'+role+'.service' for role in ('dart','news','preprocess','ai','deliver')}
+        self.assertEqual(deploy_pi.required_restarts(['pipeline_runtime.py'],True),expected)
+        self.assertEqual(deploy_pi.required_restarts(['news_monitor/ai_rules.py'],True),expected)
+        self.assertEqual(deploy_pi.required_restarts(['test_pipeline_integration.py'],True),set())
+        self.assertEqual(deploy_pi.required_restarts(['dashboard_outbox.py'],True),{'monitor-pipeline@deliver.service'})
+        deploy_pi.validate_service_scope(['ai_pipeline.py','pipeline_runtime.py','news_scan.py'])
+
     def test_secret_and_runtime_paths_rejected(self):
         for path in ("dart_monitor/config.json", "news_monitor/config_news.json",
                      "dashboard_outbox.sqlite3", "private/monitor.token", ".env.production"):

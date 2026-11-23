@@ -1,0 +1,17 @@
+{
+  "enabled": false,
+  "ai_db": "/home/pi5dart/.local/state/invest-monitor/analysis.sqlite3",
+  "dashboard_db": "/home/pi5dart/workspace/dashboard_outbox.sqlite3",
+  "news_start_at": "REPLACE_WITH_ACTUAL_EXPANSION_START_ISO8601_WITH_OFFSET",
+  "news_interval": 45,
+  "max_pages": 5,
+  "page_size": 15,
+  "limits": {
+    "interval": 60,
+    "total": 900,
+    "news": 600,
+    "dart": 200,
+    "retry": 100,
+    "max_attempts": 3
+  }
+}

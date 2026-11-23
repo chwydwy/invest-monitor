@@ -77,7 +77,7 @@ def get_raw_text(api_key, rcp_no):
             return cleaned if len(cleaned) > 50 else None
             
     except Exception as e:
-        print(f"❌ 원문 추출 실패: {e}")
+        print(f"❌ 원문 추출 실패: {type(e).__name__}")
     return None
 
 # --- [메인 엔진: 하이브리드 프롬프트 생성] ---

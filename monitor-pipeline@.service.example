@@ -1,0 +1,18 @@
+[Unit]
+Description=Invest monitor pipeline %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=pi5dart
+Group=pi5dart
+WorkingDirectory=/home/pi5dart/workspace
+Environment=MONITOR_PIPELINE_SETTINGS=/home/pi5dart/.config/invest-monitor/ai-pipeline.json
+ExecStart=/usr/bin/python3 /home/pi5dart/workspace/pipeline_runtime.py %i
+Restart=on-failure
+RestartSec=15
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
