@@ -58,7 +58,7 @@ def run_article_test():
         return
 
     decision, summary = print_ai_result(company_name, news['title'], body)
-    if decision == "NO_SEND":
+    if decision != "SEND":
         return
 
     send_choice = input("실제 Telegram 테스트 메시지를 전송할까요? [y/N]: ").strip().lower()

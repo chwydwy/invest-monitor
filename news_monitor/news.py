@@ -7,7 +7,7 @@ import sys
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs
+from naver_news import load_or_create_cutover, parse_stock_news
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dashboard_outbox import enqueue
 
@@ -17,13 +17,14 @@ def queue_dashboard_news(payload):
     try:
         enqueue(DASHBOARD_DB, payload)
     except Exception as exc:
-        print(f"대시보드 대기열 저장 실패: {type(exc).__name__}")
+        print(f"dashboard_queue_error type={type(exc).__name__}", file=sys.stderr)
 
 # --- 파일 경로 설정 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config_news.json")
 MAPPING_FILE = os.path.join(BASE_DIR, "mapping_news.json")
 TARGET_LIST_FILE = os.path.join(BASE_DIR, "Companies_ChemHold_news.txt")
+NEWS_CUTOVER_FILE = os.path.join(os.path.expanduser("~"), ".local", "state", "invest-monitor", "news-npay-cutover.txt")
 SENT_HISTORY_FILE = os.path.join(BASE_DIR, "sent_articles.json")
 DAILY_SENT_CACHE_FILE = os.path.join(BASE_DIR, "daily_sent_cache.json")
 
@@ -91,52 +92,23 @@ def is_active_time():
     return 6 <= now.hour < 22
 
 # --- 날짜 기반 뉴스 목록 가져오기 ---
-def get_latest_news_by_date(code):
-    url = f"https://finance.naver.com/item/news_news.naver?code={code}&page=1"
+def get_latest_news_by_date(code, not_before=None):
+    url = "https://stock.naver.com/api/domestic/detail/news"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Referer": f"https://finance.naver.com/item/news.naver?code={code}"
+        "User-Agent": "invest-monitor-news/1.0",
+        "Accept": "application/json",
+        "Referer": f"https://stock.naver.com/domestic/stock/{code}/news",
     }
-    
     one_day_ago = datetime.now() - timedelta(days=1)
-    
+    cutoff = max(one_day_ago, not_before) if not_before else one_day_ago
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        res.encoding = 'euc-kr'
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        news_list = []
-        rows = soup.select('table.type5 tbody tr')
-        
-        for row in rows:
-            if row.select_one('span.ico_reply'): continue
-            
-            title_tag = row.select_one('td.title a')
-            press_tag = row.select_one('td.info') # [수정] 언론사 정보 추출
-            date_tag = row.select_one('td.date')
-            if not title_tag or not date_tag: continue
-            
-            try:
-                article_date = datetime.strptime(date_tag.get_text(strip=True), "%Y.%m.%d %H:%M")
-            except:
-                continue
-
-            if article_date >= one_day_ago:
-                link = "https://finance.naver.com" + title_tag['href']
-                qs = parse_qs(urlparse(link).query)
-                aid, oid = qs.get('article_id', [''])[0], qs.get('office_id', [''])[0]
-                
-                news_list.append({
-                    'id': f"{oid}_{aid}",
-                    'title': title_tag.get_text(strip=True),
-                    'press': press_tag.get_text(strip=True) if press_tag else "알수없음", # [추가]
-                    'office_id': oid,
-                    'article_id': aid,
-                    'date': article_date,
-                    'date_raw': date_tag.get_text(strip=True)
-                })
-        return news_list
-    except:
+        res = requests.get(url, params={"itemCode": code, "page": 1, "pageSize": 15},
+                           headers=headers, timeout=10)
+        res.raise_for_status()
+        return parse_stock_news(res.json(), cutoff)
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        status = exc.response.status_code if isinstance(exc, requests.HTTPError) and exc.response is not None else None
+        print(f"news_list_error code={code} status={status} type={type(exc).__name__}", file=sys.stderr)
         return []
 
 def get_article_body(oid, aid):
@@ -144,13 +116,18 @@ def get_article_body(oid, aid):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         res = requests.get(final_url, headers=headers, timeout=10)
+        res.raise_for_status()
         soup = BeautifulSoup(res.text, 'html.parser')
         content = soup.select_one('#newsct_article') or \
                   soup.select_one('#articleBodyContents') or \
                   soup.select_one('.article_body')
         if content: return content.get_text(separator="\n", strip=True), final_url
+        print(f"news_body_missing article_id={oid}_{aid} status={res.status_code}", file=sys.stderr)
         return None, final_url
-    except: return None, final_url
+    except requests.RequestException as exc:
+        status = exc.response.status_code if isinstance(exc, requests.HTTPError) and exc.response is not None else None
+        print(f"news_body_error article_id={oid}_{aid} status={status} type={type(exc).__name__}", file=sys.stderr)
+        return None, final_url
 
 def normalize_for_comparison(text):
     text = re.sub(r'\s+', ' ', text or ' ')
@@ -213,11 +190,12 @@ def get_ai_summary(company, title, body, model=None):
             {"role": "user", "content": f"대상 기업명: {company}\n기사 제목: {title}\n기사 본문:\n{body[:2000]}"}
         ]
     }
-    while True:
+    for attempt in range(1, 4):
+        retry_delay = 60
         try:
             response = requests.post(url, headers=headers, json=data, timeout=60)
             if response.status_code == 200:
-                content = response.json()['choices'][0]['message']['content'].strip()
+                content = (response.json()['choices'][0]['message']['content'] or '').strip()
                 lines = content.splitlines()
                 decision = lines[0].strip().upper() if lines else ""
                 summary = "\n".join(lines[1:]).strip()
@@ -227,15 +205,19 @@ def get_ai_summary(company, title, body, model=None):
                 if decision == "SEND" and summary and is_korean_summary(summary):
                     return "SEND", summary
 
-                print(f"⚠️ AI 출력 형식 오류. 2초 후 재시도: {content[:100]!r}")
-                time.sleep(2)
-                continue
+                print(f"ai_format_error attempt={attempt}", file=sys.stderr)
+                retry_delay = 2
+            else:
+                print(f"ai_http_error status={response.status_code} attempt={attempt}", file=sys.stderr)
+                if response.status_code in (400, 401, 403, 404):
+                    break
 
-            print(f"⏳ AI 호출 실패(Status: {response.status_code}). 1분 후 재시도...")
-            time.sleep(60)
         except Exception as e:
-            print(f"⚠️ AI 호출 오류: {type(e).__name__}: {e}. 1분 후 재시도...")
-            time.sleep(60)
+            print(f"ai_request_error type={type(e).__name__} attempt={attempt}", file=sys.stderr)
+        if attempt < 3:
+            time.sleep(retry_delay)
+    print("ai_attempts_exhausted", file=sys.stderr)
+    return None, ""
 
 def send_telegram(company, title, summary, link, test_mode=False):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -246,9 +228,9 @@ def send_telegram(company, title, summary, link, test_mode=False):
         result = response.json()
         if response.status_code == 200 and result.get('ok') is True:
             return True
-        print(f"⚠️ 텔레그램 전송 실패(Status: {response.status_code}): {result}")
+        print(f"telegram_error status={response.status_code} error_code={result.get('error_code')}", file=sys.stderr)
     except Exception as e:
-        print(f"⚠️ 텔레그램 전송 오류: {type(e).__name__}: {e}")
+        print(f"telegram_request_error type={type(e).__name__}", file=sys.stderr)
     return False
 
 def main():
@@ -260,8 +242,11 @@ def main():
     # [추가] 제외 리스트 로드
     exclude_keywords = load_exclude_list(EXCLUDE_KEYWORDS_FILE, ["코스피", "코스닥", "시황", "ETF"])
     exclude_press = load_exclude_list(EXCLUDE_PRESS_FILE, ["동행미디어"])
-        
-    print(f"🚀 모니터링 시작: {len(target_names)}개 기업 (필터링 적용)")
+
+    # The legacy Naver endpoint stopped serving articles. Establish a durable
+    # first-run boundary so switching sources cannot replay a day's backlog.
+    news_cutover = load_or_create_cutover(NEWS_CUTOVER_FILE)
+    print(f"news_source=npay targets={len(target_names)} cutover={news_cutover.isoformat(timespec='seconds')}", file=sys.stderr)
 
     while True:
         if not is_active_time():
@@ -273,9 +258,12 @@ def main():
         
         for name in target_names:
             code = mapping.get(name)
-            if not code: continue
+            if not code:
+                print(f"news_mapping_missing company={name}", file=sys.stderr)
+                continue
             
-            news_list = get_latest_news_by_date(code)
+            news_list = get_latest_news_by_date(code, not_before=news_cutover)
+            print(f"news_list company={name} code={code} recent={len(news_list)}", file=sys.stderr)
             
             if news_list:
                 for news in reversed(news_list):
@@ -284,36 +272,41 @@ def main():
                     if unique_id not in sent_history:
                         # [추가] 1. 제목 키워드 필터링
                         if any(kw in news['title'] for kw in exclude_keywords):
-                            print(f"⏩ 키워드 제외: {news['title']}")
+                            print(f"news_excluded article_id={unique_id} reason=keyword", file=sys.stderr)
                             sent_history.append(unique_id) # 다시 안 보게 기록은 함
                             save_sent_history(sent_history)
                             continue
 
                         # [추가] 2. 언론사 필터링
                         if any(pr in news['press'] for pr in exclude_press):
-                            print(f"⏩ 언론사 제외: {news['press']} - {news['title']}")
+                            print(f"news_excluded article_id={unique_id} reason=press", file=sys.stderr)
                             sent_history.append(unique_id)
                             save_sent_history(sent_history)
                             continue
 
-                        print(f"🔔 신규 뉴스 발견: [{name}] {news['title']}")
+                        print(f"news_candidate company={name} article_id={unique_id}", file=sys.stderr)
                         body, final_link = get_article_body(news['office_id'], news['article_id'])
                         
                         if body:
+                            print(f"news_body_ok article_id={unique_id} chars={len(body)}", file=sys.stderr)
                             duplicate = find_similar_sent_article(news['title'], body, daily_sent_cache)
                             if duplicate:
-                                cached = duplicate['cached']
-                                print(f"⏩ 유사 기사 제외({duplicate['reason']}): '{news['title']}' / 기존 '{cached.get('title', '')}' (제목 {duplicate['title_similarity']:.2f}, 본문 {duplicate['body_similarity']:.2f})")
+                                print(f"news_excluded article_id={unique_id} reason=similarity title_ratio={duplicate['title_similarity']:.2f} body_ratio={duplicate['body_similarity']:.2f}", file=sys.stderr)
                                 sent_history.append(unique_id)
                                 save_sent_history(sent_history)
                                 continue
 
                             decision, summary = get_ai_summary(name, news['title'], body)
+                            if decision is None:
+                                print(f"news_ai_deferred article_id={unique_id}", file=sys.stderr)
+                                continue
                             if decision == "NO_SEND":
-                                print(f"⏩ [AI NO_SEND] {news['title']}")
+                                print(f"news_excluded article_id={unique_id} reason=ai_no_send", file=sys.stderr)
                                 sent_history.append(unique_id)
                                 save_sent_history(sent_history)
                                 continue
+
+                            print(f"news_ai_send article_id={unique_id}", file=sys.stderr)
 
                             queue_dashboard_news({
                                 "source": "news", "source_id": unique_id,
@@ -325,8 +318,10 @@ def main():
                             })
 
                             if not send_telegram(name, news['title'], summary, final_link):
-                                print(f"⚠️ 기사 ID를 기록하지 않아 다음 순회에서 재시도합니다: {unique_id}")
+                                print(f"news_telegram_retry article_id={unique_id}", file=sys.stderr)
                                 continue
+
+                            print(f"news_telegram_sent article_id={unique_id}", file=sys.stderr)
 
                             sent_history.append(unique_id)
                             save_sent_history(sent_history)
