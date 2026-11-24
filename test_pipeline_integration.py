@@ -8,7 +8,7 @@ from unittest.mock import patch
 import requests
 from ai_pipeline import Queue
 from ai_worker import tick, deliver_one
-from pipeline_runtime import Runtime, KST
+from pipeline_runtime import Runtime
 from news_monitor import ai_rules
 from news_scan import universe
 
@@ -55,8 +55,6 @@ class IntegrationTest(unittest.TestCase):
         self.http=FakeHTTP()
         self.runtime=Runtime(self.q,dict(ai_db=str(self.root/'ai.sqlite3'),dashboard_db=str(self.root/'out.sqlite3'),
             news_start_at='2026-11-23T00:00:00+09:00'),self.root,self.http)
-        self.q.put('listed_date',datetime.fromtimestamp(self.now,KST).date().isoformat())
-        self.q.put('listed_companies',{'LG화학':'051910','SK하이닉스':'000660'})
 
     def news(self,code='051910',identifier='999_1',title='LG화학 신규 공급계약'):
         return dict(id=identifier,source='news',office_id='999',article_id='1',title=title,press='가상언론',
@@ -206,25 +204,31 @@ class IntegrationTest(unittest.TestCase):
         item=self.news('0126Z0',title=company+' 신규 계약')
         self.q.put('body:'+item['id'],dict(body=company+'은 신규 계약을 체결했다.',published_at=None,
                    article_published_at_original=None,article_modified_at_original=None))
-        self.q.put('listed_companies',{company:'0126Z0'})
         prepared=self.runtime.prepare_news(item,'0126Z0')
         self.assertIsNone(prepared['event']['stock_code'])
         self.assertEqual(prepared['event']['stock_code_original'],'0126Z0')
         self.assertEqual(prepared['event']['company'],company)
 
-    def test_listing_failure_retains_subsidiary_and_other_company_continues(self):
-        bad=self.news('267250','subsidiary','HD현대케미칼 신규 계약')
-        self.q.put('body:subsidiary',dict(body='HD현대케미칼은 신규 계약을 체결했다.',published_at=None,
+    def test_holding_filter_routes_without_listing_request(self):
+        item=self.news('034730','other-subject','SK하이닉스 신규 계약')
+        self.q.put('body:other-subject',dict(body='SK하이닉스는 신규 계약을 체결했다.',published_at=None,
                    article_published_at_original=None,article_modified_at_original=None))
-        self.runtime.discover('news','subsidiary','267250',bad)
-        self.runtime.discover('news','good','051910',self.news(identifier='good'))
-        self.q.put('listed_date','2000-01-01')
-        with patch('pipeline_runtime.fetch_listed_companies',side_effect=requests.Timeout):
-            self.assertEqual(self.runtime.preprocess_one(),'pending')
-            self.assertEqual(self.runtime.preprocess_one(),'complete')
+        self.runtime.discover('news','other-subject','034730',item)
+        self.assertEqual(self.runtime.preprocess_one(),'complete')
         with self.q.db() as db:
-            self.assertEqual(db.execute("SELECT state FROM discoveries WHERE id='news:subsidiary'").fetchone()[0],'pending')
-            self.assertIsNotNone(db.execute("SELECT 1 FROM jobs WHERE id='news:good'").fetchone())
+            self.assertEqual(db.execute('SELECT count(*) FROM jobs').fetchone()[0],0)
+        outside=self.news('267250','outside','HD현대케미칼 신규 계약')
+        self.q.put('body:outside',dict(body='HD현대케미칼은 신규 계약을 체결했다.',published_at=None,
+                   article_published_at_original=None,article_modified_at_original=None))
+        self.runtime.discover('news','outside','267250',outside)
+        self.assertEqual(self.runtime.preprocess_one(),'complete')
+        self.http.answer='NO_SEND'
+        tick(self.q,self.runtime.transport,self.runtime.parse)
+        with self.q.db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM outputs').fetchone()[0],0)
+            result=json.loads(db.execute("SELECT result FROM jobs WHERE id='news:outside'").fetchone()[0])
+            self.assertEqual(result['decision'],'NO_SEND')
+        self.assertFalse(any('kind.krx' in call[1] for call in self.http.calls))
 
 
 if __name__=='__main__':unittest.main()

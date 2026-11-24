@@ -8,6 +8,8 @@
 
 `ai-pipeline.json`·`ai_pipeline_settings.json`은 비밀/개인 운영 설정으로 Git과 배포에서 제외한다. 예산 baseline은 전환 당일 이전 사용량을 모르더라도 0으로 취급하지 않도록 AI DB metadata에 저장하며 다음 UTC 날짜에는 자동 적용되지 않는다.
 
+코드 검토로 영향 역할이 명확한 배포는 `--restart-only preprocess`처럼 역할을 명시할 수 있다. 이 선택은 새 파이프라인 환경에서만 허용되며 기본 영향 매핑의 부분집합이어야 한다. 사전 권한 검사와 원격 적용에서도 같은 제한을 확인한다. 2026-11-24 기업 주체 규칙 수정은 본문 처리 역할만 사용하므로 preprocess만 재시작한다. 공통 AI/전송 코드 변경에는 임의로 이 옵션을 쓰지 않는다.
+
 2026-11-23 전환 완료: 구현 커밋 `58a506c`, 새 다섯 역할 enabled·active, 구 dart/news disabled·inactive, 기존 dashboard timer enabled·active를 확인했다. 확대 기준은 22:02:44 KST이며 당일 잔여 자체 AI 예산은 보수적으로 0, 다음 UTC 자정(2026-11-24 09:00 KST)에 재개한다. 이후 일반 배포는 `--transition` 없이 실행한다. 실제 자연 이벤트의 새 경로 종단 성공은 아직 확인하지 못했다. 아래 구 서비스 관련 설명은 전환 전 이력으로 읽고 현재 상태는 이 절과 AI_PIPELINE_LOCAL_DRAFT.md를 우선한다.
 
 ## 뉴스 소스 전환 (2026-11-23)

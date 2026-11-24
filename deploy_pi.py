@@ -126,6 +126,7 @@ from pathlib import Path
 
 root = "/home/pi5dart/workspace"
 mode, expected, target = sys.argv[1:4]
+restart_only = sys.argv[4].split(',') if len(sys.argv)>4 else None
 if not all(re.fullmatch(r"[0-9a-f]{40}", x) for x in (expected, target)):
     raise SystemExit("invalid commit identifier")
 
@@ -201,6 +202,11 @@ def required_restarts(paths, pipeline=False):
             restart.add("news.service")
     return restart
 restart = set() if mode == "transition" else required_restarts(changed,pipeline)
+if restart_only is not None:
+    selected=set(restart_only)
+    if not pipeline or not selected or not selected <= restart:
+        raise SystemExit("invalid scoped restart selection")
+    restart=selected
 
 for unit in sorted(restart):
     if not restart_authorized[unit]:
@@ -225,11 +231,15 @@ print(json.dumps({"previous": head, "applied": target, "restarted": sorted(resta
 '''
 
 
-def remote(mode, expected, target):
+def remote(mode, expected, target, restart_only=None):
     if not SHA.fullmatch(expected) or not SHA.fullmatch(target):
         raise DeployError("invalid commit identifier")
+    allowed={"monitor-pipeline@"+role+".service" for role in ('dart','news','preprocess','ai','deliver')}
+    if restart_only and not set(restart_only)<=allowed:
+        raise DeployError('invalid scoped restart selection')
+    extra=[','.join(restart_only)] if restart_only else []
     output = command(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", HOST,
-                      "python3", "-", mode, expected, target], input_text=REMOTE_PROGRAM,
+                      "python3", "-", mode, expected, target,*extra], input_text=REMOTE_PROGRAM,
                      label="Pi SSH " + mode)
     try:
         return json.loads(output)
@@ -249,6 +259,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Check or deploy an exact Git commit to Pi")
     parser.add_argument("mode", choices=("check", "apply"))
     parser.add_argument("--transition", action="store_true", help="apply code only after old services are stopped; install roles separately")
+    parser.add_argument("--restart-only",nargs='+',choices=('dart','news','preprocess','ai','deliver'),help="explicit reviewed role subset for this deployment")
     parser.add_argument("--message", help="commit message for explicitly staged files")
     args = parser.parse_args(argv)
     staged = local_check()
@@ -261,6 +272,12 @@ def main(argv=None):
     changes_since_pi = [p for p in git("diff", "--name-only", pi_head, head).splitlines() if p]
     validate_service_scope(changes_since_pi)
     needed = set() if args.transition else required_restarts([*changes_since_pi, *staged],report.get("pipeline",False))
+    selected=None
+    if args.restart_only:
+        selected={"monitor-pipeline@"+role+".service" for role in args.restart_only}
+        if not report.get('pipeline') or not selected <= needed or args.transition:
+            raise DeployError('invalid scoped restart selection')
+        needed=selected
     missing = sorted(unit for unit in needed if not report.get("restart_authorized", {}).get(unit, False))
     if missing:
         raise DeployError("noninteractive restart permission unavailable for " + ", ".join(missing))
@@ -283,7 +300,10 @@ def main(argv=None):
     published = git("ls-remote", "origin", "refs/heads/main").split()[0]
     if published != target:
         raise DeployError("published commit differs from requested commit")
-    applied = remote("transition" if args.transition else "apply", pi_head, target)
+    if selected:
+        applied=remote('apply',pi_head,target,sorted(selected))
+    else:
+        applied = remote("transition" if args.transition else "apply", pi_head, target)
     print("applied:", json.dumps(applied, sort_keys=True))
     return 0
 

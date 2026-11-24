@@ -7,7 +7,6 @@ from unittest.mock import patch
 from bs4 import BeautifulSoup
 
 from news_monitor.news_quality import (article_publication_time, choose_registration_time,
-                                       fetch_listed_companies,
                                        load_company_names, resolve_article_company)
 from news_monitor import test_naver_news as naver_tests
 
@@ -15,48 +14,44 @@ from news_monitor import test_naver_news as naver_tests
 class NewsQualityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.names = load_company_names()
-        cls.listed = {'SK하이닉스': '000660', 'SK텔레콤': '017670',
-                      '롯데케미칼': '011170', '롯데지주': '004990'}
-        cls.monitored = {cls.names.get(name, name): name for name in (
-            'SK', 'HD현대', '롯데케미칼', 'LG화학', 'TKG휴켐스')}
+        from news_scan import universe
+        companies=universe()
+        cls.names=load_company_names()
+        cls.monitored={row['name']:row['name'] for row in companies}
+        cls.sectors={row['name']:row.get('sector') for row in companies}
 
     def resolve(self, lookup, title, body):
-        return resolve_article_company(lookup, title, body, self.monitored,
-                                       self.names, self.listed)
+        return resolve_article_company(lookup,title,body,self.monitored,self.names,self.sectors)
 
-    def test_affiliate_is_not_holding_company(self):
-        self.assertEqual(self.resolve('SK', 'SK하이닉스 메모리 공급',
-                                      'SK하이닉스는 신규 공급 계약을 체결했다')[0], None)
-        self.assertEqual(self.resolve('SK', 'SK텔레콤 희망퇴직',
-                                      'SK텔레콤은 희망퇴직을 추진한다')[0], None)
-        self.assertEqual(self.resolve('SK', 'SK 관련 반도체 기사',
-                                      'SK하이닉스는 메모리를 공급한다')[1],
-                         'other_listed_company')
-        self.assertEqual(self.resolve('SK', '[연합뉴스 이 시각 헤드라인] - 18:00',
-                                      'SK가 언급됐다')[1], 'digest_title')
+    def test_holding_excludes_only_different_universe_subject(self):
+        self.assertEqual(self.resolve('SK','SK하이닉스 메모리 공급','SK하이닉스는 계약을 체결했다.'),
+                         (None,'holding_other_universe_subject'))
+        self.assertEqual(self.resolve('삼성물산','삼성전자 신규 계약','삼성전자는 신규 계약을 체결했다.')[0],None)
+        self.assertEqual(self.resolve('SK','반도체 신규 계약','SK하이닉스는 신규 계약을 체결했다.')[0],None)
 
-    def test_unlisted_subsidiary_and_normal_article(self):
-        self.assertEqual(self.resolve('HD현대', 'HD현대케미칼 설비 투자',
-                                      'HD현대케미칼은 설비 투자를 결정했다'),
-                         ('HD현대', 'unlisted_subject'))
-        self.assertEqual(self.resolve('HD현대', '석유화학 설비 투자',
-                                      'HD현대케미칼은 설비 투자를 결정했다'),
-                         ('HD현대', 'unlisted_subject_body'))
-        self.assertEqual(resolve_article_company('HD현대', 'HD현대케미칼 설비 투자',
-                         'HD현대케미칼은 설비 투자를 결정했다', self.monitored,
-                         self.names, None)[1], 'listing_unverified')
-        self.assertEqual(self.resolve('LG화학', 'LG화학 양극재 공급계약',
-                                      'LG화학은 공급계약을 체결했다')[0], 'LG화학')
-        self.assertEqual(self.resolve('HD현대', '롯데케미칼 8000억원 상환',
-                                      '롯데케미칼은 회사채를 상환했다'),
-                         (None, 'other_listed_company'))
-        self.assertEqual(self.resolve('HD현대', '롯데월드타워 담보 해지',
-                                      '롯데지주와 롯데케미칼이 각각 언급됐다')[0], None)
+    def test_nonholding_or_unknown_sector_keeps_ai_judgment(self):
+        self.assertEqual(self.resolve('LG화학','SK하이닉스 메모리 계약','SK하이닉스는 계약했다.')[0],'LG화학')
+        self.assertEqual(self.resolve('POSCO홀딩스','LG화학 공급계약','LG화학은 계약했다.')[0],'POSCO홀딩스')
+        self.assertEqual(resolve_article_company('SK','SK하이닉스 공급계약','본문',self.monitored,self.names,{})[0],'SK')
+        self.assertEqual(resolve_article_company('미확인','SK하이닉스 공급계약','본문',self.monitored,self.names,{'미확인':'지주'})[0],'미확인')
 
-    def test_confirmed_alias_retains_news_list_name(self):
-        self.assertEqual(self.resolve('TKG휴켐스', '티케이지휴켐스 신규 계약',
-                                      '티케이지휴켐스는 계약을 체결했다')[0], 'TKG휴켐스')
+    def test_outside_universe_never_uses_listing_status(self):
+        for subject in ('HD현대케미칼','테슬라','BL밖상장사'):
+            self.assertEqual(self.resolve('HD현대',subject+' 신규 계약',subject+'은 계약했다.')[0],'HD현대')
+
+    def test_alias_and_short_name_are_distinct(self):
+        self.assertEqual(self.resolve('SK','LSELECTRIC 신규 계약','엘에스일렉트릭은 계약했다.')[0],None)
+        self.assertEqual(self.resolve('SK','SK 신규 투자','SK는 신규 투자를 결정했다.' )[0],'SK')
+        self.assertEqual(self.resolve('TKG휴켐스','티케이지휴켐스 신규 계약','티케이지휴켐스는 계약했다.')[0],'TKG휴켐스')
+
+    def test_incidental_or_joint_mentions_are_not_sole_subjects(self):
+        for title,body in [
+            ('SK, SK하이닉스 사례 참고해 신규 투자','SK는 투자했다. SK하이닉스도 언급됐다.'),
+            ('지주 투자전략 발표','SK는 SK하이닉스를 사례로 언급했다.'),
+            ('SK하이닉스와 SK, 공동 사업 검토','양사는 공동 사업을 검토한다.'),
+            ('SK하이닉스의 사례를 본 SK 투자전략','업계에서는 두 회사를 비교했다.')]:
+            self.assertEqual(self.resolve('SK',title,body)[0],'SK',title)
+        self.assertEqual(self.resolve('SK','[연합뉴스 이 시각 헤드라인] - 18:00','SK가 언급됐다')[1],'digest_title')
 
     def test_registration_time_prefers_article_and_keeps_modification_separate(self):
         soup = BeautifulSoup('''<span data-date-time="2026-11-23 18:04:00"
@@ -81,20 +76,6 @@ class NewsQualityTest(unittest.TestCase):
             {'published_at': None, 'article_published_at_original': 'bad-time'}, news_time),
             ('2026-11-23T18:04:00+09:00', '202611231804'))
         self.assertEqual(choose_registration_time({}, {}), (None, None))
-
-    def test_kind_listing_keeps_alphanumeric_stock_codes(self):
-        rows = ''.join(f'<tr><td>가상기업{i}</td><td>코스피</td><td>{i:06d}</td></tr>'
-                       for i in range(2700))
-        rows += '<tr><td>SK하이닉스</td><td>유가</td><td>000660</td></tr>'
-        rows += '<tr><td>가상영문코드</td><td>코스닥</td><td>0126Z0</td></tr>'
-        class Response:
-            content = ('<table>' + rows + '</table>').encode('euc-kr')
-            def raise_for_status(self):
-                pass
-        with patch('news_monitor.news_quality.requests.get', return_value=Response()):
-            listed = fetch_listed_companies()
-        self.assertEqual(listed['가상영문코드'], '0126Z0')
-        self.assertEqual(listed['SK하이닉스'], '000660')
 
     def test_rewritten_issue_and_new_facts(self):
         news = naver_tests.NpayNewsTest.news_module()

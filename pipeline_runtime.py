@@ -22,7 +22,7 @@ from news_scan import Scanner, universe
 from news_monitor import ai_rules
 from news_monitor.naver_news import parse_stock_news
 from news_monitor.news_quality import (KST, article_publication_time,
-    choose_registration_time, fetch_listed_companies, load_company_names,
+    choose_registration_time, load_company_names,
     resolve_article_company)
 from dart_monitor import disclosure_rules
 from dart_monitor.disclosure_targets import matches_group, company_identity
@@ -266,21 +266,8 @@ class Runtime:
             cached=dict(body=tag.get_text('\n',strip=True),published_at=pub,
                         article_published_at_original=raw,article_modified_at_original=modified)
             self.q.put('body:'+item['id'],cached)
-        listed=self.q.get('listed_companies')
-        date=datetime.fromtimestamp(self.q.clock(),KST).date().isoformat()
-        if self.q.get('listed_date')!=date and self.q.clock()>=self.q.get('listed_retry_at',0):
-            try:
-                listed=fetch_listed_companies()
-                self.q.put('listed_companies',listed)
-                self.q.put('listed_date',date)
-            except (requests.RequestException,ValueError):
-                listed=None
-                self.q.put('listed_retry_at',self.q.clock()+300)
-        elif self.q.get('listed_date')!=date:
-            listed=None
-        company,reason=resolve_article_company(lookup,item['title'],cached['body'],self.monitored,self.names,listed)
-        if reason=='listing_unverified':
-            raise Deferred(reason)
+        sectors={company_identity(c['name']):c.get('sector') for c in self.companies if c.get('stock_code')}
+        company,reason=resolve_article_company(lookup,item['title'],cached['body'],self.monitored,self.names,sectors)
         if not company:
             return None
         if ai_rules.find_similar_sent_article(item['title'],cached['body'],self._sent_cache(),company):

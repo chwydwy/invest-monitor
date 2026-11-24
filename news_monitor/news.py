@@ -11,7 +11,7 @@ from naver_news import load_or_create_cutover, parse_stock_news
 from news_quality import (article_publication_time, choose_registration_time,
                           has_new_headline_fact,
                           has_material_update,
-                          fetch_listed_companies, load_company_names,
+                          load_company_names,
                           resolve_article_company, same_issue)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dashboard_outbox import enqueue

@@ -5,13 +5,10 @@ import re
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import requests
-from bs4 import BeautifulSoup
 
 
 ROOT = Path(__file__).resolve().parent.parent
 KST = timezone(timedelta(hours=9))
-KIND_LIST_URL = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download"
 PARTICLE = r"(?:은|는|이|가|을|를|의|에|에서|에게|와|과|으로|로|도|만|측|발)"
 DIGEST_TITLE = re.compile(r"이\s*시각\s*헤드라인|주요\s*뉴스|뉴스\s*브리핑|오늘의\s*뉴스|뉴스\s*모음|한눈에\s*보는")
 MATERIAL_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:조|억원?|만원?|%|GW|MW|톤|대|년|월|일)", re.I)
@@ -57,22 +54,6 @@ def load_company_names():
     return names
 
 
-def fetch_listed_companies():
-    """KIND's full KOSPI/KOSDAQ/KONEX list, fetched once per local day."""
-    response = requests.get(KIND_LIST_URL, timeout=20,
-                            headers={"User-Agent": "invest-monitor-news/1.0"})
-    response.raise_for_status()
-    soup = BeautifulSoup(response.content.decode("euc-kr", errors="replace"), "html.parser")
-    listed = {}
-    for row in soup.select("tr"):
-        cells = [cell.get_text(" ", strip=True) for cell in row.select("td")]
-        if len(cells) >= 3 and re.fullmatch(r"[0-9A-Z]{6}", cells[2]):
-            listed[cells[0]] = cells[2]
-    if len(listed) < 2700 or listed.get("SK하이닉스") != "000660":
-        raise ValueError("KIND listing format or completeness changed")
-    return listed
-
-
 def _mentions(text, names):
     hits = []
     lowered = text.lower()
@@ -90,73 +71,46 @@ def _mentions(text, names):
     return chosen
 
 
-def _prefixed_subject(lookup_company, title):
-    pattern = re.compile(r"(?<![가-힣A-Za-z0-9])" + re.escape(lookup_company) +
-                         r"[가-힣A-Za-z0-9]{2,16}", re.I)
-    for match in pattern.finditer(title):
-        candidate = match.group()
-        candidate = re.sub(r"(?:에서는|에게는|으로는|에서|에게|으로|은|는|이|가|을|를|의|에|와|과|로|도|만)$", "", candidate)
-        if candidate != lookup_company:
-            return candidate
+def _primary_subject(text, names):
+    """Conservative headline/lead subject; mentions later in a clause do not count."""
+    text = re.sub(r'^\s*(?:\[[^\]]*\]\s*)+', '', text).strip()
+    hits = _mentions(text, names)
+    leading = [hit for hit in hits if hit[0] == 0]
+    if not leading:
+        return None
+    hit = leading[0]
+    tail = text[hit[1]:]
+    # A name used as a comparison, source, object or joint mention is not a
+    # reliable sole subject. Ambiguous cases continue to the existing AI.
+    if re.match(r'(?:와|과|에\s|에서|에게|을|를|의|처럼|보다)', tail):
+        return None
+    if re.match(r'(?:은|는|이|가)(?=\s|[,，:：])|\s*[,，:：]|\s+[^\s]', tail):
+        return hit[2]
     return None
 
 
 def resolve_article_company(lookup_company, title, body, monitored_companies,
-                            names=None, listed_companies=None):
-    """Keep unlisted subsidiary news; exclude a different listed subject."""
+                            names=None, sectors=None):
+    """Only holding-sector lookups exclude another universe company's subject."""
     if DIGEST_TITLE.search(title):
         return None, "digest_title"
     names = names if names is not None else load_company_names()
-    expanded = dict(names)
-    if listed_companies is not None:
-        for listed_name in listed_companies:
-            expanded.setdefault(listed_name, listed_name)
-    monitored = (monitored_companies if isinstance(monitored_companies, dict)
-                 else {name: name for name in monitored_companies})
-    title_hits = _mentions(title, expanded)
-    body_hits = _mentions(body[:2000], expanded)
-    title_targets = {hit[2] for hit in title_hits if hit[2] in monitored}
-    title_other = {hit[2] for hit in title_hits if hit[2] not in monitored}
-    body_targets = {hit[2] for hit in body_hits if hit[2] in monitored}
-    body_other = {hit[2] for hit in body_hits if hit[2] not in monitored}
-
-    if len(title_targets) > 1:
-        return None, "multiple_companies"
-    if title_targets:
-        if title_other:
-            return None, "ambiguous_company"
-        target = monitored[next(iter(title_targets))]
-        if target != lookup_company:
-            return None, "other_listed_company"
-        if body_other and not body_targets:
-            return None, "other_listed_company"
-        return target, "title_company"
-    if title_other:
-        return None, "other_listed_company"
-    subsidiary = _prefixed_subject(lookup_company, title)
-    if subsidiary:
-        if listed_companies is None:
-            return None, "listing_unverified"
-        if subsidiary in listed_companies:
-            return None, "other_listed_company"
-        return lookup_company, "unlisted_subject"
-    if len(body_targets) == 1 and not body_other:
-        target = monitored[next(iter(body_targets))]
-        if target != lookup_company:
-            return None, "other_listed_company"
-        return target, "body_company"
-    if len(body_targets) > 1:
-        return None, "multiple_companies"
-    if body_other:
-        return None, "other_listed_company"
-    subsidiary = _prefixed_subject(lookup_company, body[:500])
-    if subsidiary:
-        if listed_companies is None:
-            return None, "listing_unverified"
-        if subsidiary in listed_companies:
-            return None, "other_listed_company"
-        return lookup_company, "unlisted_subject_body"
-    return None, "company_unverified"
+    lookup_identity = names.get(lookup_company, lookup_company)
+    monitored = set(monitored_companies)
+    if sectors is None:
+        catalog = json.loads((ROOT / "DASHBOARD_COMPANIES.json").read_text(encoding="utf-8"))
+        sectors = {row['name']: row.get('sector') for row in catalog['companies'] if row.get('stock_code')}
+    if lookup_identity not in monitored or sectors.get(lookup_identity) != '지주':
+        return lookup_company, "ai_relevance_check"
+    title_subject = _primary_subject(title, names)
+    # A clear lookup-company headline wins over incidental body mentions.
+    subject = title_subject
+    if subject is None:
+        lead = re.split(r'(?<=[.!?。])\s+|\n+', body[:500])[0].strip()
+        subject = _primary_subject(lead, names)
+    if subject and subject != lookup_identity and subject in monitored:
+        return None, "holding_other_universe_subject"
+    return lookup_company, "ai_relevance_check"
 
 
 def article_publication_time(soup):

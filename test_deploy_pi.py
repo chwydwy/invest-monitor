@@ -17,6 +17,24 @@ class DeployPiTest(unittest.TestCase):
         self.assertEqual(deploy_pi.required_restarts(['dashboard_outbox.py'],True),{'monitor-pipeline@deliver.service'})
         deploy_pi.validate_service_scope(['ai_pipeline.py','pipeline_runtime.py','news_scan.py'])
 
+    @patch.object(deploy_pi,'remote')
+    @patch.object(deploy_pi,'remote_head',return_value=OLD)
+    @patch.object(deploy_pi,'git')
+    @patch.object(deploy_pi,'local_check',return_value=['pipeline_runtime.py'])
+    def test_reviewed_preprocess_only_restart(self,local_check,git,remote_head,remote):
+        count=0
+        def fake_git(*args):
+            nonlocal count
+            if args[0]=='rev-parse':return NEW
+            if args[0]=='ls-remote':
+                count+=1
+                return (OLD if count==1 else NEW)+'\trefs/heads/main'
+            return ''
+        git.side_effect=fake_git
+        remote.return_value={'pipeline':True,'restart_authorized':{'monitor-pipeline@preprocess.service':True}}
+        self.assertEqual(deploy_pi.main(['apply','--message','Subject filter','--restart-only','preprocess']),0)
+        self.assertEqual(remote.call_args.args,('apply',OLD,NEW,['monitor-pipeline@preprocess.service']))
+
     def test_secret_and_runtime_paths_rejected(self):
         for path in ("dart_monitor/config.json", "news_monitor/config_news.json",
                      "dashboard_outbox.sqlite3", "private/monitor.token", ".env.production"):
