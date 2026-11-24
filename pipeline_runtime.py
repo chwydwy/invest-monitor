@@ -27,6 +27,7 @@ from news_monitor.news_quality import (KST, article_publication_time,
 from dart_monitor import disclosure_rules
 from dart_monitor.disclosure_targets import matches_group, company_identity
 from dart_monitor.disclosure_filters import excluded_title_reason, subsidiary_decision, reporting_company
+from operations_metrics import mark
 
 ROOT = Path(__file__).resolve().parent
 MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
@@ -65,9 +66,7 @@ class Runtime:
 
     def discover(self, source, identifier, company, payload, exclusion=None):
         with self.q.db() as db:
-            db.execute('INSERT OR IGNORE INTO discoveries(id,company,payload,state,reason) VALUES (?,?,?,?,?)',
-                       (source+':'+identifier, company, json.dumps(payload,ensure_ascii=False),
-                        'excluded' if exclusion else 'pending',exclusion))
+            self.q.insert_discovery(db,source,identifier,company,payload,exclusion)
 
     def dart_step(self, rss=None):
         now = self.q.clock()
@@ -81,6 +80,7 @@ class Runtime:
             response.raise_for_status()
             rss = response.content
         entries = ET.fromstring(rss).findall('.//item')
+        self.q.record(success='dart_collect')
         if not entries:
             return 'empty'
         last = self.q.get('dart_last_link')
@@ -195,6 +195,7 @@ class Runtime:
                 if reason:
                     db.execute("UPDATE jobs SET state='excluded',reason=?,payload=? WHERE id=?",
                                (reason,json.dumps(payload,ensure_ascii=False),row['id']))
+                    mark(db,self.q.clock(),'dart','excluded',row['id'])
                 elif decision['reason']!='not_subsidiary_notice':
                     db.execute('UPDATE jobs SET payload=? WHERE id=?',
                                (json.dumps(payload,ensure_ascii=False),row['id']))
@@ -207,6 +208,7 @@ class Runtime:
                 p=json.loads(row['payload'])
                 if ai_rules.find_similar_sent_article(p['event']['title'],p['body'],cache,p['event']['company']):
                     db.execute("UPDATE jobs SET state='excluded',reason='similar_completed_issue' WHERE id=?",(row['id'],))
+                    mark(db,self.q.clock(),'news','excluded',row['id'])
 
     def preprocess_one(self):
         # A separate process, never invoked by the list collectors.
@@ -238,6 +240,9 @@ class Runtime:
                 if existing:
                     self._discovery_state(row['rowid'],'complete','duplicate_job')
                     return 'duplicate'
+                if source=='news' and identifier in self._legacy_ids():
+                    self._discovery_state(row['rowid'],'complete','legacy_history')
+                    return 'complete'
                 with self.q.db() as db:
                     db.execute("UPDATE discoveries SET state='running' WHERE rowid=?",(row['rowid'],))
                 try:
@@ -248,7 +253,7 @@ class Runtime:
                         if decision.get('reason') not in (None,'not_subsidiary_notice'):
                             reason=decision['reason']
                     else:
-                        reason='filtered'
+                        reason='body_unavailable' if source=='dart' else 'filtered'
                 except DartExcluded as exc:
                     state,reason='excluded',exc.reason
                     if exc.decision:
@@ -274,7 +279,18 @@ class Runtime:
 
     def _discovery_state(self,rowid,state,reason):
         with self.q.db() as db:
+            row=db.execute('SELECT id,payload FROM discoveries WHERE rowid=?',(rowid,)).fetchone()
             db.execute('UPDATE discoveries SET state=?,reason=? WHERE rowid=?',(state,reason,rowid))
+            try:
+                source=json.loads(row['payload']).get('source','news')
+                key=row['id'] if row['id'].startswith(source+':') else source+':'+row['id']
+                metric=('excluded' if state=='excluded' or reason=='filtered' else
+                        'failed' if state in ('pending','hold') or reason=='body_unavailable' else None)
+                mark(db,self.q.clock(),source,metric,key,
+                     'preprocess' if state in ('complete','excluded') and reason!='body_unavailable' else None)
+                if state=='hold':mark(db,self.q.clock(),source,'held',key)
+            except (ValueError,TypeError,AttributeError):
+                pass
 
     def prepare_news(self,item,code):
         if item['id'] in self._legacy_ids():
@@ -451,6 +467,8 @@ def main(default_role=None):
                     print(json.dumps(q.status(),ensure_ascii=False));return
                 print(json.dumps(dict(role=args.role,state=result)),flush=True)
             except Exception as exc:
+                stage={'dart':'dart_collect','news':'news_collect'}.get(args.role,args.role)
+                q.record_error(stage,args.role,type(exc).__name__)
                 print(json.dumps(dict(role=args.role,error=type(exc).__name__)),flush=True)
             if args.once:return
             time.sleep(2)

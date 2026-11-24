@@ -61,3 +61,8 @@ Pi의 일반 계정은 현재 `pi5dart` 하나이며 root 비밀번호는 잠겨
 - Pi 코드 적용 후 서비스 재시작/상태 확인에 실패할 수 있다. 자동으로 Git을 되돌리거나 SQLite를 복원하지 않는다. `systemctl show dart.service news.service -p ActiveState -p Result -p ExecMainStatus`로 상태를 확인하고, 기록된 이전 커밋과 적용 커밋을 비교한다.
 - 코드 버전 복구는 Windows에서 문제 커밋을 `git revert`로 되돌리는 **새 커밋**을 만들고 테스트·push·배포하는 방식을 기본으로 한다. Pi에서 `git reset --hard`나 운영 데이터 삭제를 하지 않는다. DB 스키마/데이터 변경은 별도 백업·마이그레이션 절차가 필요하며 코드 복구가 DB를 되돌리지 않는다.
 - 비밀 설정, `dashboard_outbox.sqlite3` 및 SQLite 보조 파일, 뉴스 중복 기록은 Git 제외를 유지한다. 도구는 이 파일들을 출력하거나 전송하지 않는다.
+
+
+## 30분 운영 상태 보고 (2026-11-25)
+
+운영 현황은 별도 `operations-report.timer/service`로 기존 DB 기록만 읽어 보고한다. `/events`·기존 인증·AI 예산·Telegram과 독립적이며 상세 계약, 지표 정의, 최초 연결 및 하루 관찰 절차는 [OPERATIONS_REPORT_HANDOFF.md](OPERATIONS_REPORT_HANDOFF.md)를 따른다. 당일 전이 시각을 복원할 수 없는 기존 누적 상태는 오늘 건수로 표시하지 않는다. 통계 카운터는 실제 작업 확정 지점에 추가되며 기존 운영 데이터는 보존한다. 보고 실패 시 무한 적재/즉시 재시도하지 않는다.

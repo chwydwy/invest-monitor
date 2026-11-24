@@ -1,6 +1,7 @@
 """Single analysis call per tick; callbacks build and validate existing prompts."""
 from email.utils import parsedate_to_datetime
 from dashboard_sender import exclusive_lock
+from operations_metrics import mark
 
 
 class DeliveryHold(Exception):
@@ -93,4 +94,12 @@ def deliver_one(queue, send):
         with queue.db() as db:
             db.execute('UPDATE outputs SET state=?,reason=?,due=? WHERE job=? AND destination=?',
                        (state,reason,queue.clock() if state=='delivered' else queue.clock()+min(3600,60*2**min(row['attempts'],6)),row['job'],row['destination']))
+            source=row['job'].split(':',1)[0]
+            stage='dashboard_enqueue' if row['destination']=='dashboard' else 'telegram'
+            if state=='delivered':
+                mark(db,queue.clock(),success=stage)
+                mark(db,queue.clock(),success='deliver')
+            else:
+                mark(db,queue.clock(),source,'failed',row['job'])
+                if state=='hold':mark(db,queue.clock(),source,'held',row['job'])
         return state

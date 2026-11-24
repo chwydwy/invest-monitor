@@ -68,8 +68,8 @@ class Scanner:
                     if date < self.start:
                         continue
                     with self.q.db() as db:
-                        db.execute('INSERT OR IGNORE INTO discoveries(id,company,payload) VALUES (?,?,?)',
-                                   (item['id'], code, json.dumps(item, ensure_ascii=False)))
+                        self.q.insert_discovery(db,'news',item['id'],code,item,prefixed=False)
+                self.q.record(success='news_collect')
                 complete = complete or exhausted
                 if complete:
                     gap = None
@@ -80,6 +80,7 @@ class Scanner:
                     return 'more_pages'
         except Exception as exc:
             gap = type(exc).__name__
+            self.q.record_error('news_collect','news',gap)
         with self.q.db() as db:
             db.execute('INSERT OR REPLACE INTO scans VALUES (?,?,?,?)',
                        (code, self.q.clock() if gap is None else (prior['last_success'] if prior else None),

@@ -1,0 +1,10 @@
+[Unit]
+Description=Report latest monitor state every thirty minutes
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+Persistent=true
+Unit=operations-report.service
+
+[Install]
+WantedBy=timers.target

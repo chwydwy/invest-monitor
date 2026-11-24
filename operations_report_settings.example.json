@@ -1,0 +1,8 @@
+{
+  "ai_db": "/home/pi5dart/.local/state/invest-monitor/analysis.sqlite3",
+  "dashboard_db": "/home/pi5dart/workspace/dashboard_outbox.sqlite3",
+  "endpoint": "https://market-research-hub.marketresearchhub-0980d4.workers.dev/api/operations/pi-report",
+  "token_file": "/home/pi5dart/.config/invest-monitor/operations-report.token",
+  "state_file": "/home/pi5dart/.local/state/invest-monitor/operations-report.json",
+  "limits": {"total": 900, "news": 600, "dart": 200, "retry": 100}
+}

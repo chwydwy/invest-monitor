@@ -84,3 +84,8 @@ DART는 첫 시작 때 기존 RSS 항목을 건너뛰는 정책을 유지하되 
 - 자연 발견/AI job/전송 의도는 관찰 구간 0건, 새 AI 시도 0건. 오늘 잔여 예산은 baseline 반영으로 모든 구간 0이다. 따라서 실제 SEND/NO_SEND·방별 전송·등록시각·429 동작의 새 운영 경로 검증은 아직 미완료다. 테스트 이벤트나 과거 기사를 보내지 않았다. 새 역할 로그에 오류 타입은 관찰되지 않았다.
 - `deploy_pi.py check`가 새 서비스 구성을 인식하고 다섯 역할 active·재시작 권한과 기존 timer enabled를 확인했다. 관리 권한은 확대하지 않았다.
 - 복구 백업 manifest에 이전/적용 커밋, 확대 시작·DB·unit 경로·예산 재개 시각을 기록했다. 초기 백업 시 잘못된 SQLite URI 때문에 생긴 빈 파일은 backup 폴더에 격리했고 실제 운영 DB는 올바른 읽기 전용 URI와 backup API로 재복사해 integrity_check=ok를 확인했다. 운영 DB는 변경하지 않았다.
+
+
+## 30분 운영 상태 보고 (2026-11-25)
+
+운영 현황은 별도 `operations-report.timer/service`로 기존 DB 기록만 읽어 보고한다. `/events`·기존 인증·AI 예산·Telegram과 독립적이며 상세 계약, 지표 정의, 최초 연결 및 하루 관찰 절차는 [OPERATIONS_REPORT_HANDOFF.md](OPERATIONS_REPORT_HANDOFF.md)를 따른다. 당일 전이 시각을 복원할 수 없는 기존 누적 상태는 오늘 건수로 표시하지 않는다. 통계 카운터는 실제 작업 확정 지점에 추가되며 기존 운영 데이터는 보존한다. 보고 실패 시 무한 적재/즉시 재시도하지 않는다.

@@ -16,6 +16,8 @@ class DeployPiTest(unittest.TestCase):
         self.assertEqual(deploy_pi.required_restarts(['test_pipeline_integration.py'],True),set())
         self.assertEqual(deploy_pi.required_restarts(['dashboard_outbox.py'],True),{'monitor-pipeline@deliver.service'})
         deploy_pi.validate_service_scope(['ai_pipeline.py','pipeline_runtime.py','news_scan.py'])
+        self.assertEqual(deploy_pi.required_restarts(['operations_metrics.py'],True),expected)
+        self.assertEqual(deploy_pi.required_restarts(['operations_report.py'],True),set())
 
     @patch.object(deploy_pi,'remote')
     @patch.object(deploy_pi,'remote_head',return_value=OLD)

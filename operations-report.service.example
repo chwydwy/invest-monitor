@@ -1,0 +1,13 @@
+[Unit]
+Description=Report existing monitor state to dashboard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi5dart
+Group=pi5dart
+WorkingDirectory=/home/pi5dart/workspace
+UMask=0077
+ExecStart=/usr/bin/python3 /home/pi5dart/workspace/operations_report.py --settings /home/pi5dart/.config/invest-monitor/operations-report.json
+TimeoutStartSec=45

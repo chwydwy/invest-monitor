@@ -4,6 +4,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from operations_metrics import initialize as initialize_metrics, mark
 
 DEFAULTS = dict(interval=60, total=900, news=600, dart=200, retry=100, max_attempts=3)
 
@@ -33,6 +34,35 @@ class Queue:
                     checkpoint TEXT, gap TEXT);
                 CREATE TABLE IF NOT EXISTS gaps(id INTEGER PRIMARY KEY,company TEXT,at REAL,boundary TEXT,reason TEXT);
             ''')
+            initialize_metrics(db,self.clock())
+
+    def record(self,source=None,metric=None,item=None,success=None):
+        try:
+            with self.db() as db:
+                mark(db,self.clock(),source,metric,item,success)
+        except sqlite3.Error:
+            pass
+
+    def record_error(self,stage,source,code):
+        try:
+            with self.db() as db:
+                db.execute('INSERT OR REPLACE INTO operations_errors VALUES (?,?,?,?)',
+                           (stage,source,self.clock(),code))
+        except sqlite3.Error:
+            pass
+
+    def insert_discovery(self,db,source,identifier,company,payload,exclusion=None,prefixed=True):
+        key=source+':'+identifier
+        seen=db.execute("SELECT 1 FROM discoveries WHERE id IN (?,?) AND coalesce(json_extract(payload,'$.source'),'news')=? LIMIT 1",
+                        (identifier,key,source)).fetchone()
+        added=db.execute('INSERT OR IGNORE INTO discoveries(id,company,payload,state,reason) VALUES (?,?,?,?,?)',
+                         (key if prefixed else identifier,company,json.dumps(payload,ensure_ascii=False),
+                          'excluded' if exclusion else 'pending',exclusion)).rowcount
+        if added and not seen:
+            mark(db,self.clock(),source,'collected',key)
+        if added and exclusion:
+            mark(db,self.clock(),source,'excluded',key)
+        return added
 
     @contextmanager
     def db(self):
@@ -136,6 +166,12 @@ class Queue:
                        (state, due, json.dumps(result, ensure_ascii=False), reason, job['id']))
             db.execute('UPDATE attempts SET outcome=? WHERE id=?',
                        ('success' if status == 200 else reason, job['attempt_id']))
+            mark(db,now,job['source'],'ai_completed' if status==200 else 'failed',job['id'],
+                 'ai' if status==200 else None)
+            if status==200 and isinstance(result,dict) and result.get('decision')=='NO_SEND':
+                mark(db,now,job['source'],'excluded',job['id'])
+            if state=='hold':
+                mark(db,now,job['source'],'held',job['id'])
 
     def status(self):
         now = self.clock()
