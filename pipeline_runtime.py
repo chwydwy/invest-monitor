@@ -26,6 +26,7 @@ from news_monitor.news_quality import (KST, article_publication_time,
     resolve_article_company)
 from dart_monitor import disclosure_rules
 from dart_monitor.disclosure_targets import matches_group, company_identity
+from dart_monitor.disclosure_filters import excluded_title_reason, subsidiary_decision, reporting_company
 
 ROOT = Path(__file__).resolve().parent
 MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
@@ -62,10 +63,11 @@ class Runtime:
         path = self.root / ('dart_monitor/config.json' if source == 'dart' else 'news_monitor/config_news.json')
         return json.loads(path.read_text(encoding='utf-8'))
 
-    def discover(self, source, identifier, company, payload):
+    def discover(self, source, identifier, company, payload, exclusion=None):
         with self.q.db() as db:
-            db.execute('INSERT OR IGNORE INTO discoveries(id,company,payload) VALUES (?,?,?)',
-                       (source+':'+identifier, company, json.dumps(payload,ensure_ascii=False)))
+            db.execute('INSERT OR IGNORE INTO discoveries(id,company,payload,state,reason) VALUES (?,?,?,?,?)',
+                       (source+':'+identifier, company, json.dumps(payload,ensure_ascii=False),
+                        'excluded' if exclusion else 'pending',exclusion))
 
     def dart_step(self, rss=None):
         now = self.q.clock()
@@ -102,7 +104,7 @@ class Runtime:
                 continue
             if '증권' in title and any(x in title for x in ['증권발행','투자설명','일괄신고']):
                 continue
-            company = title.split(' - ')[0].strip() if ' - ' in title else title.split(' ')[0].strip()
+            company = reporting_company(title)
             submitter = entry.findtext('{http://purl.org/dc/elements/1.1/}creator') or ''
             market = '유가증권시장' in submitter or '코스닥시장' in submitter
             selected = [g for g,names in groups.items() if matches_group(names,company,submitter.strip(),market)]
@@ -114,7 +116,8 @@ class Runtime:
                 self.discover('dart',match[1],company,dict(source='dart',source_id=match[1],receipt_no=match[1],
                     company=company,title=title,url=link,published_at=None,
                     published_at_original=entry.findtext('pubDate'),monitor_groups=selected,sector=None,
-                    disclosure_type=title.split(' - ',1)[-1] if ' - ' in title else None))
+                    disclosure_type=title.split(' - ',1)[-1] if ' - ' in title else None),
+                    exclusion=excluded_title_reason(title,company))
         self.q.put('dart_last_link',entries[0].findtext('link'))
         return 'collected'
 
@@ -176,7 +179,25 @@ class Runtime:
         # Recheck once the serial worker reaches the job: another article may
         # have completed while this one waited. No API attempt is charged.
         cache=self._sent_cache()
+        aliases=json.loads((self.root/'DASHBOARD_COMPANY_ALIASES.json').read_text(encoding='utf-8'))
         with self.q.db() as db:
+            for row in db.execute("SELECT id,payload FROM jobs WHERE source='dart' AND state='pending'").fetchall():
+                payload=json.loads(row['payload']);event=payload['event']
+                reason=excluded_title_reason(event['title'],event['company'])
+                if not reason:
+                    messages=payload.get('request',{}).get('messages',[])
+                    prompt=messages[0].get('content','') if messages else ''
+                    match=re.search(r'--- \[공시 본문 시작\] ---\s*(.*?)\s*--- \[공시 본문 끝\] ---',prompt,re.S)
+                    decision=subsidiary_decision(event['title'],match[1] if match else '',event['company'],self.companies,aliases)
+                    payload['filter_decision']=decision
+                    if decision['exclude']:
+                        reason=decision['reason']
+                if reason:
+                    db.execute("UPDATE jobs SET state='excluded',reason=?,payload=? WHERE id=?",
+                               (reason,json.dumps(payload,ensure_ascii=False),row['id']))
+                elif decision['reason']!='not_subsidiary_notice':
+                    db.execute('UPDATE jobs SET payload=? WHERE id=?',
+                               (json.dumps(payload,ensure_ascii=False),row['id']))
             for row in db.execute("SELECT payload,result,created FROM jobs WHERE source='news' AND state='complete' AND created>=?",(self.q.clock()-86400,)).fetchall():
                 result=json.loads(row['result'] or '{}')
                 if result.get('decision')=='SEND':
@@ -223,8 +244,18 @@ class Runtime:
                     prepared=self.prepare_dart(payload) if source=='dart' else self.prepare_news(payload,row['company'])
                     if prepared is not None:
                         self.q.enqueue(source,identifier,prepared)
+                        decision=prepared.get('filter_decision',{})
+                        if decision.get('reason') not in (None,'not_subsidiary_notice'):
+                            reason=decision['reason']
                     else:
                         reason='filtered'
+                except DartExcluded as exc:
+                    state,reason='excluded',exc.reason
+                    if exc.decision:
+                        payload['_filter_decision']=exc.decision
+                        with self.q.db() as db:
+                            db.execute('UPDATE discoveries SET payload=? WHERE rowid=?',
+                                       (json.dumps(payload,ensure_ascii=False),row['rowid']))
                 except Deferred as exc:
                     state,reason='pending',exc.reason
                 except Exception as exc:
@@ -290,6 +321,9 @@ class Runtime:
                     chem=company_identity(company) in self.chem)
 
     def prepare_dart(self,event):
+        title_reason=excluded_title_reason(event['title'],event['company'])
+        if title_reason:
+            raise DartExcluded(title_reason)
         raw=disclosure_rules.get_raw_text(self.credentials('dart')['DART_API_KEY'],event['source_id'])
         if not raw:
             # Existing failure notification, once; body extraction itself does not
@@ -297,13 +331,18 @@ class Runtime:
             message=f"{event['title']}\n\n내용: 원문을 가져오지 못해 AI 분석을 수행하지 못했습니다.\n\n🔗 {event['url']}"
             self.add_output('dart:'+event['source_id'],'telegram:dart:bl',dict(message=message))
             return None
+        aliases=json.loads((self.root/'DASHBOARD_COMPANY_ALIASES.json').read_text(encoding='utf-8'))
+        decision=subsidiary_decision(event['title'],raw,event['company'],self.companies,aliases)
+        if decision['exclude']:
+            raise DartExcluded(decision['reason'],decision)
         _,prompt=disclosure_rules.generate_custom_prompt(raw,event['title'])
         if not prompt:
             raise Deferred('dart_body_short')
         priorities=read_list(self.root/'dart_monitor/priority_keywords.txt')
         priority=(any(x in event['title'] or x in raw for x in priorities) and
                   not any(x in event['title'] for x in ['현물배당','매출액또는손익구조','주요경영사항']))
-        return dict(event=event,priority=priority,request=dict(model=MODEL,messages=[dict(role='user',content=prompt)]))
+        return dict(event=event,priority=priority,filter_decision=decision,
+                    request=dict(model=MODEL,messages=[dict(role='user',content=prompt)]))
 
     def add_output(self,job,destination,payload):
         with self.q.db() as db:
@@ -374,6 +413,13 @@ class Runtime:
 class Deferred(Exception):
     def __init__(self,reason):
         self.reason=reason
+
+
+class DartExcluded(Deferred):
+    """Permanent per-discovery exclusion, before prompt or delivery creation."""
+    def __init__(self,reason,decision=None):
+        super().__init__(reason)
+        self.decision=decision
 
 
 def main(default_role=None):

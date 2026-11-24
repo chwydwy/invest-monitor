@@ -230,5 +230,85 @@ class IntegrationTest(unittest.TestCase):
             self.assertEqual(result['decision'],'NO_SEND')
         self.assertFalse(any('kind.krx' in call[1] for call in self.http.calls))
 
+    def test_dart_excluded_title_persisted_without_body_ai_or_delivery(self):
+        xml='''<rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><item><title>LG화학 - [기재정정] 특수관계인과의 보험 거래</title><link>https://example.invalid/?rcpNo=20261125001</link><dc:creator>LG화학</dc:creator></item></channel></rss>'''
+        self.q.put('dart_last_link','prior')
+        with patch('pipeline_runtime.disclosure_rules.get_raw_text') as body:
+            self.runtime.dart_step(xml)
+            self.assertEqual(self.runtime.preprocess_one(),'waiting')
+            self.now+=3600
+            self.runtime.dart_step(xml)
+            body.assert_not_called()
+        with self.q.db() as db:
+            row=db.execute('SELECT state,reason FROM discoveries').fetchone()
+            self.assertEqual(tuple(row),('excluded','title_type:특수관계인과의보험거래'))
+            self.assertEqual(db.execute('SELECT count(*) FROM discoveries').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT count(*) FROM jobs').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT count(*) FROM outputs').fetchone()[0],0)
+
+    def test_dart_subsidiary_exclusion_blocks_priority_and_retry(self):
+        event=self.dart(title='LG화학 - 합병 (자회사의 주요경영사항)')
+        # A monitored reporting company discloses another monitored subsidiary.
+        self.runtime.discover('dart',event['source_id'],'LG화학',event)
+        raw='자회사인 | SK하이닉스 | 의 주요경영사항신고 합병 검토 중. '*10
+        with patch('pipeline_runtime.disclosure_rules.get_raw_text',return_value=raw) as body:
+            self.assertEqual(self.runtime.preprocess_one(),'excluded')
+            self.assertEqual(self.runtime.preprocess_one(),'waiting')
+            self.assertEqual(body.call_count,1)
+        with self.q.db() as db:
+            row=db.execute('SELECT state,reason,payload FROM discoveries').fetchone()
+            self.assertEqual(row['reason'],'subsidiary_in_universe')
+            self.assertEqual(json.loads(row['payload'])['_filter_decision']['target_codes'],['000660'])
+            self.assertEqual(db.execute('SELECT count(*) FROM jobs').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT count(*) FROM outputs').fetchone()[0],0)
+
+    def test_pending_discovery_and_ai_job_filtered_without_reanalysis(self):
+        event=self.dart(title='LG화학 - 의결권대리행사권유참고서류')
+        self.runtime.discover('dart',event['source_id'],'LG화학',event)
+        with patch('pipeline_runtime.disclosure_rules.get_raw_text') as body:
+            self.assertEqual(self.runtime.preprocess_one(),'excluded')
+            body.assert_not_called()
+        event2=self.dart('20261125002',title='LG화학 - 주주명부폐쇄기간또는기준일설정')
+        prepared=dict(event=event2,priority=False,request={'model':'existing','messages':[]})
+        self.q.enqueue('dart',event2['source_id'],prepared)
+        self.runtime.discover('dart',event2['source_id'],'LG화학',event2)
+        self.assertEqual(self.runtime.preprocess_one(),'duplicate')
+        with self.q.db() as db:
+            self.assertEqual(db.execute('SELECT state FROM jobs').fetchone()[0],'pending')
+            self.assertEqual(json.loads(db.execute('SELECT payload FROM jobs').fetchone()[0]),prepared)
+        with patch.object(self.runtime,'transport') as transport:
+            self.assertEqual(tick(self.q,transport,self.runtime.parse,self.runtime.ai_preflight),'waiting')
+            transport.assert_not_called()
+        with self.q.db() as db:
+            self.assertEqual(db.execute('SELECT state FROM jobs').fetchone()[0],'excluded')
+            self.assertEqual(db.execute('SELECT count(*) FROM attempts').fetchone()[0],0)
+
+    def test_pending_subsidiary_cached_prompt_filtered_but_completed_output_untouched(self):
+        from dart_monitor.disclosure_rules import generate_custom_prompt
+        event=self.dart(title='LG화학 - 합병 (자회사의 주요경영사항)')
+        raw='자회사인 | SK하이닉스 | 의 주요경영사항신고 합병 검토 중. '*10
+        _,prompt=generate_custom_prompt(raw,event['title'])
+        prepared=dict(event=event,priority=True,request=dict(model='existing',messages=[dict(role='user',content=prompt)]))
+        self.q.enqueue('dart',event['source_id'],prepared)
+        with self.q.db() as db:
+            db.execute("INSERT INTO jobs(id,source,payload,state,created,due,result) VALUES (?,?,?,?,?,?,?)",
+                       ('dart:completed','dart',json.dumps(prepared),'complete',self.now,0,'"original result"'))
+        self.runtime.add_output('dart:completed','dashboard',dict(original='preserve'))
+        self.runtime.ai_preflight()
+        with self.q.db() as db:
+            self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?',('dart:'+event['source_id'],)).fetchone()[0],'excluded')
+            self.assertEqual(db.execute("SELECT state,result FROM jobs WHERE id='dart:completed'").fetchone()[0],'complete')
+            self.assertEqual(db.execute('SELECT count(*) FROM outputs').fetchone()[0],1)
+
+    def test_dart_unidentified_target_keeps_ai_path_and_records_decision(self):
+        event=self.dart(title='LG화학 - 공급계약 (종속회사의 주요경영사항)')
+        self.runtime.discover('dart',event['source_id'],'LG화학',event)
+        with patch('pipeline_runtime.disclosure_rules.get_raw_text',return_value='다른 회사는 SK하이닉스다. '*20):
+            self.assertEqual(self.runtime.preprocess_one(),'complete')
+        with self.q.db() as db:
+            row=db.execute('SELECT reason FROM discoveries').fetchone()
+            self.assertEqual(row[0],'subsidiary_target_unidentified')
+            self.assertEqual(db.execute('SELECT count(*) FROM jobs').fetchone()[0],1)
+
 
 if __name__=='__main__':unittest.main()
