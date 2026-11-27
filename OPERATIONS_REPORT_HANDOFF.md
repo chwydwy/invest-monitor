@@ -1,5 +1,7 @@
 # Pi 운영 상태 보고
 
+2026-11-28 뉴스 제목 선별 전환 이후에도 스키마 v1을 사용한다. 기존 `issues`에 `source=news`, `state=stage_counts`로 `stage=title_selection`과 `stage=individual_summary` 두 줄을 제공한다. 제목 대기·묶음 배정·보류, 완료 묶음과 선택·미선정, 새 경로의 개별 요약 상태를 구분한다. 상태 및 누적 수는 KST 일일 활동과 별개다. 호출 수는 UTC 당일 예약을 기준으로 하며 재시도와 그날 전환 이전 개별 분석도 포함한다. 제목 선별 성공은 개별 AI 요약 완료 수에 포함하지 않는다. 두 줄은 현행 운영 현황에서 읽을 수 있으며 카드용 구조화는 별도 계약 변경이 필요하다.
+
 2026-11-25. 계약 근거: 대시보드 프로젝트 `PI-OPERATIONS-REPORT-HANDOFF.md` v1 및 실제 `src/modules/pi-report.js` 검증기. 기존 `/events` 계약과 별개이며 상대 프로젝트는 수정하지 않는다.
 
 ## 실행과 격리

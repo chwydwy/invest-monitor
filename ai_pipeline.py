@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from operations_metrics import initialize as initialize_metrics, mark
+import news_selection
 
 DEFAULTS = dict(interval=60, total=900, news=600, dart=200, retry=100, max_attempts=3)
 
@@ -14,6 +15,7 @@ class Queue:
         self.path = str(path)
         self.clock = clock or (lambda: datetime.now(timezone.utc).timestamp())
         self.limits = dict(DEFAULTS, **(limits or {}))
+        self.news_policy = dict(news_selection.DEFAULTS)
         if self.limits['interval'] < 60 or any(self.limits[k]<0 for k in ('total','news','dart','retry')):
             raise ValueError('invalid AI limits')
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +37,7 @@ class Queue:
                 CREATE TABLE IF NOT EXISTS gaps(id INTEGER PRIMARY KEY,company TEXT,at REAL,boundary TEXT,reason TEXT);
             ''')
             initialize_metrics(db,self.clock())
+            news_selection.initialize(db)
 
     def record(self,source=None,metric=None,item=None,success=None):
         try:
@@ -53,11 +56,15 @@ class Queue:
 
     def insert_discovery(self,db,source,identifier,company,payload,exclusion=None,prefixed=True):
         key=source+':'+identifier
+        if source=='news' and db.execute('SELECT 1 FROM news_tombstones WHERE id=?',(identifier,)).fetchone():
+            return 0
+        if source=='news' and db.execute('SELECT 1 FROM news_candidates WHERE id=?',(identifier,)).fetchone():
+            return 0
         seen=db.execute("SELECT 1 FROM discoveries WHERE id IN (?,?) AND coalesce(json_extract(payload,'$.source'),'news')=? LIMIT 1",
                         (identifier,key,source)).fetchone()
-        added=db.execute('INSERT OR IGNORE INTO discoveries(id,company,payload,state,reason) VALUES (?,?,?,?,?)',
+        added=db.execute('INSERT OR IGNORE INTO discoveries(id,company,payload,state,reason,first_seen) VALUES (?,?,?,?,?,?)',
                          (key if prefixed else identifier,company,json.dumps(payload,ensure_ascii=False),
-                          'excluded' if exclusion else 'pending',exclusion)).rowcount
+                          'excluded' if exclusion else 'pending',exclusion,self.clock())).rowcount
         if added and not seen:
             mark(db,self.clock(),source,'collected',key)
         if added and exclusion:
@@ -91,6 +98,7 @@ class Queue:
             raise ValueError('invalid source')
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
+            if source=='news' and db.execute('SELECT 1 FROM news_tombstones WHERE id=?',(source_id,)).fetchone():return 0
             url=payload.get('event',{}).get('url')
             if url and db.execute("SELECT 1 FROM jobs WHERE source=? AND json_extract(payload,'$.event.url')=? LIMIT 1",(source,url)).fetchone():
                 return 0
@@ -128,10 +136,19 @@ class Queue:
             last_source = meta.get('last_source', 'news')
             sources = ['dart', 'news'] if last_source == 'news' else ['news', 'dart']
             for source in sources:
-                for row in db.execute("SELECT * FROM jobs WHERE source=? AND state='pending' AND due<=? ORDER BY created,id", (source, now)):
+                stage_used={r[0]:r[1] for r in db.execute("SELECT CASE WHEN json_extract(j.payload,'$.kind')='title_selection' THEN 'selection' ELSE 'summary' END,count(*) FROM attempts a JOIN jobs j ON j.id=a.job WHERE j.source='news' AND a.day=? AND a.bucket='news' GROUP BY 1",(day,))}
+                summary_pending=db.execute("SELECT count(*) FROM jobs WHERE source='news' AND state='pending' AND coalesce(json_extract(payload,'$.kind'),'')!='title_selection' AND attempts=0").fetchone()[0]
+                for row in db.execute("SELECT * FROM jobs WHERE source=? AND state='pending' AND due<=? ORDER BY CASE WHEN json_extract(payload,'$.kind')='title_selection' THEN 1 ELSE 0 END,created,id", (source, now)):
                     bucket = 'retry' if row['attempts'] else source
                     if used.get(bucket, 0) >= self.limits[bucket]:
                         continue
+                    if source=='news' and self.news_policy['enabled']:
+                        selection=json.loads(row['payload']).get('kind')=='title_selection'
+                        summary_left=self.news_policy['summary_daily_limit']-stage_used.get('summary',0)
+                        if selection and (summary_left<=summary_pending or
+                            (not row['attempts'] and stage_used.get('selection',0)>=self.news_policy['selection_daily_limit'])):
+                            continue
+                        if not selection and not row['attempts'] and summary_left<=0:continue
                     db.execute("UPDATE jobs SET state='running',attempts=attempts+1 WHERE id=?", (row['id'],))
                     attempt = db.execute('INSERT INTO attempts(job,day,bucket,started,outcome) VALUES (?,?,?,?,?)',
                                          (row['id'], day, bucket, now, 'running')).lastrowid
@@ -147,6 +164,8 @@ class Queue:
             db.execute('BEGIN IMMEDIATE')
             if status == 200:
                 state, due = 'complete', 0
+                if job['payload'].get('kind')=='title_selection':
+                    news_selection.complete_batch(db,job,result,now)
                 for destination, payload in outputs:
                     db.execute('INSERT OR IGNORE INTO outputs(job,destination,payload) VALUES (?,?,?)',
                                (job['id'], destination, json.dumps(payload, ensure_ascii=False)))
@@ -166,7 +185,10 @@ class Queue:
                        (state, due, json.dumps(result, ensure_ascii=False), reason, job['id']))
             db.execute('UPDATE attempts SET outcome=? WHERE id=?',
                        ('success' if status == 200 else reason, job['attempt_id']))
-            mark(db,now,job['source'],'ai_completed' if status==200 else 'failed',job['id'],
+            selection=job['payload'].get('kind')=='title_selection'
+            if selection:
+                db.execute('UPDATE news_batches SET state=? WHERE id=?',(state,job['payload']['batch_id']))
+            mark(db,now,job['source'],('title_completed' if selection else 'ai_completed') if status==200 else 'failed',job['id'],
                  'ai' if status==200 else None)
             if status==200 and isinstance(result,dict) and result.get('decision')=='NO_SEND':
                 mark(db,now,job['source'],'excluded',job['id'])
@@ -187,7 +209,7 @@ class Queue:
             if baseline.get('day')==day:
                 for bucket in ('news','dart','retry'):
                     usage[bucket]=usage.get(bucket,0)+baseline.get(bucket,0)
-            return dict(jobs=jobs, usage=usage, remaining={k: max(0, v - (sum(usage.values()) if k == 'total' else usage.get(k, 0))) for k,v in self.limits.items() if k in ('total','news','dart','retry')},
+            return dict(news_stages=news_selection.stage_status(db,now),jobs=jobs, usage=usage, remaining={k: max(0, v - (sum(usage.values()) if k == 'total' else usage.get(k, 0))) for k,v in self.limits.items() if k in ('total','news','dart','retry')},
                 local_usage=local_usage,budget_baseline=baseline if baseline.get('day')==day else None,
                 failed_attempts=db.execute("SELECT count(*) FROM attempts WHERE day=? AND outcome NOT IN ('success','running')", (day,)).fetchone()[0],
                 outputs=[dict(r) for r in db.execute('SELECT destination,state,count(*) AS count FROM outputs GROUP BY destination,state')],

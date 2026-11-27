@@ -28,6 +28,7 @@ from dart_monitor import disclosure_rules
 from dart_monitor.disclosure_targets import matches_group, company_identity
 from dart_monitor.disclosure_filters import excluded_title_reason, subsidiary_decision, reporting_company
 from operations_metrics import mark
+import news_selection
 
 ROOT = Path(__file__).resolve().parent
 MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
@@ -45,6 +46,9 @@ def active_news(now):
 class Runtime:
     def __init__(self, queue, settings, root=ROOT, session=None):
         self.q, self.settings, self.root = queue, settings, Path(root)
+        self.q.news_policy=news_selection.policy(settings)
+        if self.q.get('news_title_cutover') and not self.q.news_policy['enabled']:
+            raise ValueError('title selection cannot be bypassed after cutover')
         self.http = session or requests.Session()
         self.companies = universe(self.root)
         self.by_code = {x['stock_code']: x for x in self.companies}
@@ -199,12 +203,12 @@ class Runtime:
                 elif decision['reason']!='not_subsidiary_notice':
                     db.execute('UPDATE jobs SET payload=? WHERE id=?',
                                (json.dumps(payload,ensure_ascii=False),row['id']))
-            for row in db.execute("SELECT payload,result,created FROM jobs WHERE source='news' AND state='complete' AND created>=?",(self.q.clock()-86400,)).fetchall():
+            for row in db.execute("SELECT payload,result,created FROM jobs WHERE source='news' AND state='complete' AND coalesce(json_extract(payload,'$.kind'),'')!='title_selection' AND created>=?",(self.q.clock()-86400,)).fetchall():
                 result=json.loads(row['result'] or '{}')
                 if result.get('decision')=='SEND':
                     p=json.loads(row['payload'])
                     cache.append(dict(company=p['event']['company'],title=p['event']['title'],body=p['body']))
-            for row in db.execute("SELECT id,payload FROM jobs WHERE source='news' AND state='pending' AND attempts=0").fetchall():
+            for row in db.execute("SELECT id,payload FROM jobs WHERE source='news' AND state='pending' AND attempts=0 AND coalesce(json_extract(payload,'$.kind'),'')!='title_selection'").fetchall():
                 p=json.loads(row['payload'])
                 if ai_rules.find_similar_sent_article(p['event']['title'],p['body'],cache,p['event']['company']):
                     db.execute("UPDATE jobs SET state='excluded',reason='similar_completed_issue' WHERE id=?",(row['id'],))
@@ -213,6 +217,8 @@ class Runtime:
     def preprocess_one(self):
         # A separate process, never invoked by the list collectors.
         with exclusive_lock(self.q.path+'.preprocess'):
+            if self.q.news_policy['enabled']:
+                news_selection.create_batch(self.q,MODEL)
             with self.q.db() as db:
                 db.execute("UPDATE discoveries SET state='pending',reason='interrupted' WHERE state='running'")
                 rows=db.execute("SELECT rowid,* FROM discoveries WHERE state='pending' ORDER BY rowid").fetchall()
@@ -248,7 +254,11 @@ class Runtime:
                 try:
                     prepared=self.prepare_dart(payload) if source=='dart' else self.prepare_news(payload,row['company'])
                     if prepared is not None:
-                        self.q.enqueue(source,identifier,prepared)
+                        if source=='news' and self.q.news_policy['enabled']:
+                            news_selection.add_candidate(self.q,identifier,prepared,row['first_seen'])
+                            news_selection.create_batch(self.q,MODEL)
+                        else:
+                            self.q.enqueue(source,identifier,prepared)
                         decision=prepared.get('filter_decision',{})
                         if decision.get('reason') not in (None,'not_subsidiary_notice'):
                             reason=decision['reason']
@@ -320,7 +330,8 @@ class Runtime:
         if ai_rules.find_similar_sent_article(item['title'],cached['body'],self._sent_cache(),company):
             return None
         pub,raw=choose_registration_time(cached,item)
-        if pub and datetime.fromisoformat(pub)<datetime.fromisoformat(self.settings['news_start_at']):
+        cutover=self.q.get('news_title_cutover')
+        if pub and datetime.fromisoformat(pub)<datetime.fromisoformat(cutover or self.settings['news_start_at']):
             return None
         groups=list(self.by_code[code]['disclosure_groups'])
         event=dict(source='news',source_id=item['id'],article_id=item['id'],company=company,
@@ -372,6 +383,8 @@ class Runtime:
             json=job['payload']['request'],timeout=60)
 
     def parse(self,job,content):
+        if job['payload'].get('kind')=='title_selection':
+            return news_selection.parse_selection(job,content)
         payload=job['payload'];event=dict(payload['event']);outputs=[]
         if job['source']=='news':
             decision,summary=ai_rules.parse_response(content)

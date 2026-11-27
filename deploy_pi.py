@@ -77,14 +77,14 @@ def validate_service_scope(paths):
                 and path not in ("dashboard_outbox.py", "dashboard_sender.py", "deploy_pi.py",
                                  "test_dashboard_outbox.py", "test_deploy_pi.py", "test_disclosure_targets.py",
                                  "ai_pipeline.py", "ai_worker.py", "ai_pipeline_cli.py", "news_scan.py", "pipeline_runtime.py",
-                                 "test_ai_pipeline.py", "test_pipeline_integration.py", "test_disclosure_filters.py", "operations_metrics.py", "operations_report.py", "install_operations_token.py", "test_operations_report.py")):
+                                 "test_ai_pipeline.py", "test_pipeline_integration.py", "test_disclosure_filters.py", "operations_metrics.py", "operations_report.py", "install_operations_token.py", "test_operations_report.py", "news_selection.py", "news_cutover.py", "test_news_selection.py")):
             raise DeployError("change requires an unmapped service")
 
 
 def required_restarts(paths, pipeline=False):
     if pipeline:
         changed = [p for p in paths if not p.rsplit("/",1)[-1].startswith("test_")]
-        if any(p.endswith((".py", ".txt", ".json")) and (p.startswith(("dart_monitor/", "news_monitor/")) or p in ("ai_pipeline.py", "ai_worker.py", "news_scan.py", "pipeline_runtime.py", "operations_metrics.py", "DASHBOARD_COMPANIES.json", "DASHBOARD_COMPANY_ALIASES.json")) for p in changed):
+        if any(p.endswith((".py", ".txt", ".json")) and (p.startswith(("dart_monitor/", "news_monitor/")) or p in ("ai_pipeline.py", "ai_worker.py", "news_scan.py", "pipeline_runtime.py", "operations_metrics.py", "news_selection.py", "DASHBOARD_COMPANIES.json", "DASHBOARD_COMPANY_ALIASES.json")) for p in changed):
             return {"monitor-pipeline@" + role + ".service" for role in ("dart","news","preprocess","ai","deliver")}
         return {"monitor-pipeline@deliver.service"} if "dashboard_outbox.py" in paths else set()
     restart = set()
@@ -116,7 +116,7 @@ def local_check():
     git("diff", "--cached", "--check")
     command([sys.executable, "-m", "py_compile", "dashboard_outbox.py", "dashboard_sender.py",
              "dart_monitor/dart.py", "news_monitor/news.py"], label="Python syntax check")
-    command([sys.executable, "-m", "unittest", "test_dashboard_outbox", "test_ai_pipeline", "test_pipeline_integration", "news_monitor.test_news_quality", "news_monitor.test_naver_news", "test_deploy_pi", "test_disclosure_filters", "test_operations_report", "-q"], label="local outbox tests")
+    command([sys.executable, "-m", "unittest", "test_dashboard_outbox", "test_ai_pipeline", "test_pipeline_integration", "news_monitor.test_news_quality", "news_monitor.test_naver_news", "test_deploy_pi", "test_disclosure_filters", "test_operations_report", "test_news_selection", "-q"], label="local outbox tests")
     command([sys.executable, "-m", "unittest", "test_disclosure_targets", "-v"], label="local disclosure target tests")
     return staged
 
@@ -184,13 +184,13 @@ if any(path.startswith("stock_monitor/") or path.endswith("requirements.txt") or
        (path.endswith(".py") and not path.startswith(("dart_monitor/", "news_monitor/"))
         and path not in ("dashboard_outbox.py", "dashboard_sender.py", "deploy_pi.py", "test_dashboard_outbox.py", "test_deploy_pi.py", "test_disclosure_targets.py",
                                  "ai_pipeline.py", "ai_worker.py", "ai_pipeline_cli.py", "news_scan.py", "pipeline_runtime.py",
-                                 "test_ai_pipeline.py", "test_pipeline_integration.py", "test_disclosure_filters.py", "operations_metrics.py", "operations_report.py", "install_operations_token.py", "test_operations_report.py"))
+                                 "test_ai_pipeline.py", "test_pipeline_integration.py", "test_disclosure_filters.py", "operations_metrics.py", "operations_report.py", "install_operations_token.py", "test_operations_report.py", "news_selection.py", "news_cutover.py", "test_news_selection.py"))
        for path in changed):
     raise SystemExit("change requires an unmapped service; no code applied")
 def required_restarts(paths, pipeline=False):
     if pipeline:
         changed = [p for p in paths if not p.rsplit("/",1)[-1].startswith("test_")]
-        if any(p.endswith((".py", ".txt", ".json")) and (p.startswith(("dart_monitor/", "news_monitor/")) or p in ("ai_pipeline.py", "ai_worker.py", "news_scan.py", "pipeline_runtime.py", "operations_metrics.py", "DASHBOARD_COMPANIES.json", "DASHBOARD_COMPANY_ALIASES.json")) for p in changed):
+        if any(p.endswith((".py", ".txt", ".json")) and (p.startswith(("dart_monitor/", "news_monitor/")) or p in ("ai_pipeline.py", "ai_worker.py", "news_scan.py", "pipeline_runtime.py", "operations_metrics.py", "news_selection.py", "DASHBOARD_COMPANIES.json", "DASHBOARD_COMPANY_ALIASES.json")) for p in changed):
             return {"monitor-pipeline@" + role + ".service" for role in ("dart","news","preprocess","ai","deliver")}
         return {"monitor-pipeline@deliver.service"} if "dashboard_outbox.py" in paths else set()
     restart = set()

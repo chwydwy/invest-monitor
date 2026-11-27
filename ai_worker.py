@@ -39,6 +39,9 @@ def tick(queue, transport, parse, preflight=None):
                 content = response.json()['choices'][0]['message']['content']
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError('empty content')
+                if (job['payload'].get('kind')=='title_selection' and
+                    response.json()['choices'][0].get('finish_reason') not in (None,'stop')):
+                    raise ValueError('incomplete content')
                 result, outputs = parse(job, content)
             except (KeyError, IndexError, ValueError, TypeError):
                 queue.finish(job, 598, result={'invalid_content':locals().get('content')})

@@ -48,6 +48,8 @@ class Scanner:
         with self.q.db() as db:
             prior = db.execute('SELECT * FROM scans WHERE company=?', (code,)).fetchone()
         boundary = datetime.fromisoformat(prior['checkpoint']) if prior and prior['checkpoint'] else self.start
+        cutover = self.q.get('news_title_cutover')
+        floor = max(self.start, datetime.fromisoformat(cutover)) if cutover else self.start
         newest = boundary
         complete, gap = False, 'page_cap'
         last_start = now
@@ -61,12 +63,10 @@ class Scanner:
                 batch, exhausted = fetch(code, page)
                 for item in batch:
                     date = datetime.fromisoformat(item['published_at'])
-                    if date < boundary:
+                    if date < max(boundary, floor):
                         complete = True
                         continue
                     newest = max(newest, date)
-                    if date < self.start:
-                        continue
                     with self.q.db() as db:
                         self.q.insert_discovery(db,'news',item['id'],code,item,prefixed=False)
                 self.q.record(success='news_collect')

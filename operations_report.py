@@ -102,6 +102,14 @@ def snapshot(settings, now=None):
             report['delivery']['dashboard_enqueue']=delivery_counts([r for r in rows if r['destination']=='dashboard'])
             report['delivery']['telegram']=delivery_counts([r for r in rows if r['destination'].startswith('telegram:')])
             discoveries=dict(db.execute('SELECT state,count(*) FROM discoveries GROUP BY state'))
+            if 'news_candidates' in tables and db.execute("SELECT 1 FROM meta WHERE key='news_title_cutover'").fetchone():
+                from news_selection import stage_status
+                stages=stage_status(db,now)
+                c=stages['candidates'];b=stages['batches'];s=stages['summaries'];calls=stages['calls_utc']
+                issues.append(dict(source='news',stage='title_selection',state='stage_counts',
+                    message=f"제목 대기 {c.get('waiting',0)}, 묶음 배정 {c.get('batched',0)}, 완료 묶음 {b.get('complete',0)}, 보류 묶음 {b.get('hold',0)}, 누적 선택 {c.get('selected',0)}, 미선정 {c.get('not_selected',0)}."))
+                issues.append(dict(source='news',stage='individual_summary',state='stage_counts',
+                    message=f"새 경로 요약 대기 {s.get('pending',0)}, 처리 {s.get('running',0)}, 완료 {s.get('complete',0)}, 보류 {s.get('hold',0)}, 재시도 대기 {stages['summary_retry']}. UTC 당일 호출은 제목 선별 {calls.get('title_selection',0)}, 개별 요약 {calls.get('summary',0)} (재시도 포함)."))
             gaps=db.execute('SELECT count(*) FROM scans WHERE gap IS NOT NULL').fetchone()[0]
             if gaps:issues.append(dict(source='news',stage='collect',state='coverage_gap',message=f'현재 {gaps}개 기업의 조회 구간이 상한 또는 오류로 미확인입니다.'))
             for stage,held in [('ai',jobs.get('hold',0)),('preprocess',discoveries.get('hold',0))]:
