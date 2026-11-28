@@ -32,6 +32,8 @@ import news_selection
 
 ROOT = Path(__file__).resolve().parent
 MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+IMPORTANCE_VERSION = 1
+IMPORTANCE_LABELS = {'high':'매우 중요','normal':'일반'}
 
 
 def read_list(path):
@@ -344,8 +346,22 @@ class Runtime:
             # separately and let its confirmed-name catalog matching work.
             event['stock_code']=None
             event['stock_code_original']=code
-        return dict(event=event,body=cached['body'],request=ai_rules.build_request(company,item['title'],cached['body']),
-                    chem=company_identity(company) in self.chem)
+        classify=self.settings.get('classify_importance') is True
+        recent_titles=[]
+        if classify:
+            with self.q.db() as db:
+                recent_titles=[r[0] for r in db.execute(
+                    "SELECT DISTINCT json_extract(payload,'$.event.title') FROM jobs WHERE source='news' "
+                    "AND state='complete' AND created>=? AND json_extract(result,'$.decision')='SEND' "
+                    "AND json_extract(payload,'$.event.company')=? AND id<>? ORDER BY created DESC LIMIT 8",
+                    (self.q.clock()-2*86400,company,'news:'+item['id'])) if r[0]]
+        prepared=dict(event=event,body=cached['body'],
+                      request=ai_rules.build_request(company,item['title'],cached['body'],classify_importance=classify,
+                                                     recent_titles=recent_titles),
+                      chem=company_identity(company) in self.chem)
+        if classify:
+            prepared['importance_version']=IMPORTANCE_VERSION
+        return prepared
 
     def prepare_dart(self,event):
         title_reason=excluded_title_reason(event['title'],event['company'])
@@ -362,14 +378,18 @@ class Runtime:
         decision=subsidiary_decision(event['title'],raw,event['company'],self.companies,aliases)
         if decision['exclude']:
             raise DartExcluded(decision['reason'],decision)
-        _,prompt=disclosure_rules.generate_custom_prompt(raw,event['title'])
+        classify=self.settings.get('classify_importance') is True
+        _,prompt=disclosure_rules.generate_custom_prompt(raw,event['title'],classify_importance=classify)
         if not prompt:
             raise Deferred('dart_body_short')
         priorities=read_list(self.root/'dart_monitor/priority_keywords.txt')
         priority=(any(x in event['title'] or x in raw for x in priorities) and
                   not any(x in event['title'] for x in ['현물배당','매출액또는손익구조','주요경영사항']))
-        return dict(event=event,priority=priority,filter_decision=decision,
-                    request=dict(model=MODEL,messages=[dict(role='user',content=prompt)]))
+        prepared=dict(event=event,priority=priority,filter_decision=decision,
+                      request=dict(model=MODEL,messages=[dict(role='user',content=prompt)]))
+        if classify:
+            prepared['importance_version']=IMPORTANCE_VERSION
+        return prepared
 
     def add_output(self,job,destination,payload):
         with self.q.db() as db:
@@ -386,25 +406,42 @@ class Runtime:
         if job['payload'].get('kind')=='title_selection':
             return news_selection.parse_selection(job,content)
         payload=job['payload'];event=dict(payload['event']);outputs=[]
+        version=payload.get('importance_version')
+        if version is not None and (type(version) is not int or version!=IMPORTANCE_VERSION):
+            raise ValueError('unknown importance version')
         if job['source']=='news':
-            decision,summary=ai_rules.parse_response(content)
+            if version:
+                importance,summary=ai_rules.parse_importance(content)
+                decision='NO_SEND' if importance=='exclude' else 'SEND'
+                metadata=dict(importance=importance,importance_version=version)
+            else:
+                decision,summary=ai_rules.parse_response(content)
+                metadata={}
             if decision=='SEND':
-                event['summary']=summary
+                event.update(summary=summary,**metadata)
                 outputs.append(('dashboard',event))
                 if payload['chem']:
                     message=f"<b>[{event['company']}]</b>\n{event['title']}\n\n{summary.replace('**','')}\n\n🔗 <a href='{event['url']}'>뉴스 원문 보기</a>"
                     outputs.append(('telegram:news:chem',dict(message=message,parse_mode='HTML')))
-            return dict(content=content,decision=decision,summary=summary),outputs
-        if 'AI 분석 지연' in content or (content.strip()!='NO_SEND' and len(re.findall('[a-zA-Z]',content))>len(content)*.5):
+            return dict(content=content,decision=decision,summary=summary,**metadata),outputs
+        if 'AI 분석 지연' in content or (not version and content.strip()!='NO_SEND' and len(re.findall('[a-zA-Z]',content))>len(content)*.5):
             raise ValueError('invalid dart response')
-        text=content.replace('**','').replace('*','')
-        match=re.search(r'SCORE:\s*(\d+)',text,re.I)
-        score=int(match[1]) if match else 0
-        summary=re.sub(r'SCORE:\s*\d+','',text,flags=re.I).strip()
-        no_send='NO_SEND' in summary
-        message=f"{event['title']}\n\n🤖 AI 분석({score}):\n{summary}\n\n🔗 {event['url']}"
+        if version:
+            importance,summary=disclosure_rules.parse_importance(content)
+            no_send=importance is None
+            metadata=dict(importance=importance,importance_version=version) if importance else {}
+            label=IMPORTANCE_LABELS.get(importance,'')
+        else:
+            text=content.replace('**','').replace('*','')
+            match=re.search(r'SCORE:\s*(\d+)',text,re.I)
+            score=int(match[1]) if match else 0
+            summary=re.sub(r'SCORE:\s*\d+','',text,flags=re.I).strip()
+            no_send='NO_SEND' in summary
+            metadata=dict(score=score)
+            label=str(score)
+        message=f"{event['title']}\n\n🤖 AI 분석({label}):\n{summary}\n\n🔗 {event['url']}"
         if not no_send:
-            event.update(analysis=summary,score=score)
+            event.update(analysis=summary,**metadata)
             outputs.extend([('dashboard',event),('telegram:dart:bl',dict(message=message))])
             if 'ChemHold' in event['monitor_groups']:
                 outputs.append(('telegram:dart:chem',dict(message=message)))
@@ -421,7 +458,7 @@ class Runtime:
                     continue
                 seen.add(room)
             unique.append((destination,value))
-        return dict(content=content,score=score,decision='NO_SEND' if no_send else 'SEND'),unique
+        return dict(content=content,decision='NO_SEND' if no_send else 'SEND',**metadata),unique
 
     def send(self,destination,payload):
         if destination=='dashboard':

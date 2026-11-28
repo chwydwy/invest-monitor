@@ -170,6 +170,7 @@ class ConnectedSelectionTest(IntegrationTest):
     def setUp(self):
         super().setUp()
         self.runtime.settings['news_selection']=dict(enabled=True,batch_size=1)
+        self.runtime.settings['classify_importance']=True
         self.q.news_policy=policy(self.runtime.settings)
 
     # Do not inherit the legacy direct-news integration expectations here.
@@ -178,11 +179,13 @@ class ConnectedSelectionTest(IntegrationTest):
         self.assertEqual(self.runtime.preprocess_one(),'complete')
         self.http.answer='[1]'
         self.assertEqual(tick(self.q,self.runtime.transport,self.runtime.parse,self.runtime.ai_preflight),'complete')
-        self.now+=60;self.http.answer='SEND\n공급계약을 체결했다고 밝혔다.\n계약 규모는 2조원이다.'
+        self.now+=60;self.http.answer='IMPORTANCE: high\n공급계약을 체결했다고 밝혔다.\n계약 규모는 2조원이다.'
         self.assertEqual(tick(self.q,self.runtime.transport,self.runtime.parse,self.runtime.ai_preflight),'complete')
         with self.q.db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM outputs').fetchone()[0],2)
             self.assertEqual(db.execute('SELECT count(*) FROM attempts').fetchone()[0],2)
+            event=json.loads(db.execute("SELECT payload FROM outputs WHERE destination='dashboard'").fetchone()[0])
+            self.assertEqual((event['importance'],event['importance_version']),('high',1))
         requests=[x[2]['json'] for x in self.http.calls if 'openrouter' in x[1]]
         self.assertNotIn('2조원',requests[0]['messages'][-1]['content'])
         self.assertEqual(requests[1]['messages'],self.runtime.prepare_news(self.news(),'051910')['request']['messages'])

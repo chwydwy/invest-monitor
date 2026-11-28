@@ -74,7 +74,7 @@ AI_RELEVANCE_RULES = (
     " 기사에 없는 영향이나 인과관계는 추정하지 마라."
 )
 
-def build_request(company, title, body, model=None):
+def build_request(company, title, body, model=None, *, classify_importance=False, recent_titles=()):
     data = {
         "model": model or "nvidia/nemotron-3-ultra-550b-a55b:free",
         "messages": [
@@ -82,6 +82,24 @@ def build_request(company, title, body, model=None):
             {"role": "user", "content": f"대상 기업명: {company}\n기사 제목: {title}\n기사 본문:\n{body[:2000]}"}
         ]
     }
+    if classify_importance:
+        system = data["messages"][0]
+        start = system["content"].index("반드시 한국어를 사용하고")
+        end = system["content"].index("요약에는 기사 본문에 명시된 사실만")
+        system["content"] = system["content"][:start] + (
+            "SEND 후보 판단을 아래 중요도로 최종 분류한다. SEND와 NO_SEND 단어 자체는 출력하지 않는다. "
+            "첫 줄의 형식은 정확히 IMPORTANCE: high, IMPORTANCE: normal, IMPORTANCE: exclude 중 하나다. "
+            "high는 구체적이고 새로운 실적·가이던스 급변, 주요 사업·수주 진전이나 차질, 규제·소송·사고 등 "
+            "대상 기업의 실적·전망·기업가치나 주가에 큰 영향을 줄 수 있는 사실이 본문에서 확인된 경우다. "
+            "기사의 실제 주체와 영향이 귀속되는 기업을 구분하고, 대상 기업에 직접 귀속되는 사실을 확인한다. "
+            "normal은 직접 관련된 유용한 새 정보이지만 영향의 크기나 확실성이 high에 못 미치는 경우다. "
+            "홍보, 단순 언급, 기존 보도의 반복, 새 투자 정보 없음은 exclude다. "
+            "후속 보도는 새 금액, 결정, 실적, 차질 등 본문에서 확인된 변화만 평가한다. "
+            "참고 제목과 같은 사건이라도 본문의 실질적 새 사실은 반영한다. 참고 제목만으로 새 사실을 단정하거나 요약하지 않는다. "
+            "exclude이면 분류 한 줄로 끝낸다. high 또는 normal이면 이어서 한국어 핵심 요약 2~3줄을 쓴다. "
+        ) + system["content"][end:]
+        if recent_titles:
+            data["messages"][1]["content"] += "\n기존 전송 대상의 참고 제목:\n" + "\n".join(recent_titles)
     return data
 
 def parse_response(content):
@@ -93,3 +111,18 @@ def parse_response(content):
     if decision == "SEND" and summary and is_korean_summary(summary):
         return decision, summary
     raise ValueError("invalid news AI response")
+
+
+def parse_importance(content):
+    lines = content.strip().splitlines()
+    marker = re.fullmatch(r'IMPORTANCE: (high|normal|exclude)', lines[0].strip()) if lines else None
+    if marker:
+        importance = marker[1]
+        if importance == 'exclude' and len(lines) == 1:
+            return importance, ''
+        summary = '\n'.join(lines[1:]).strip()
+        if (importance != 'exclude' and 2 <= len(lines[1:]) <= 3 and
+                all(line.strip() for line in lines[1:]) and is_korean_summary(summary) and
+                not re.search(r'(?im)^\s*(?:IMPORTANCE|SCORE)\s*:|\b(?:NO_SEND|SEND)\b', summary)):
+            return importance, summary
+    raise ValueError('invalid news importance response')

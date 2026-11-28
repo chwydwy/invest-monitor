@@ -60,6 +60,50 @@ class IntegrationTest(unittest.TestCase):
         return dict(id=identifier,source='news',office_id='999',article_id='1',title=title,press='가상언론',
                     published_at='2026-11-23T18:04:00+09:00',npay_datetime_raw='202611231804')
 
+    def test_news_importance_after_title_selection_and_invalid_retry(self):
+        self.runtime.settings['classify_importance']=True
+        prepared=self.runtime.prepare_news(self.news(),'051910')
+        self.assertEqual(prepared['importance_version'],1)
+        self.assertIn('IMPORTANCE: exclude',prepared['request']['messages'][0]['content'])
+        for label in ('high','normal','exclude'):
+            content=f'IMPORTANCE: {label}'
+            if label!='exclude':content+='\n공급계약을 체결했다.\n계약금액은 2조원이다.'
+            result,outputs=self.runtime.parse(dict(source='news',payload=prepared),content)
+            self.assertEqual(result['importance'],label)
+            self.assertEqual([d for d,_ in outputs],[] if label=='exclude' else ['dashboard','telegram:news:chem'])
+            if outputs:
+                self.assertEqual(outputs[0][1]['importance_version'],1)
+                self.assertEqual(outputs[0][1]['importance'],label)
+        for invalid in ('NO_SEND','IMPORTANCE: exclude\n요약','IMPORTANCE: unknown\n한국어\n요약','IMPORTANCE: normal\n요약'):
+            with self.assertRaises(ValueError):self.runtime.parse(dict(source='news',payload=prepared),invalid)
+        self.q.enqueue('news','999_1',prepared)
+        self.http.answer='SEND\n분류가 없다.\n따라서 실패한다.'
+        self.assertEqual(tick(self.q,self.runtime.transport,self.runtime.parse),'format_retry')
+        with self.q.db() as db:
+            self.assertEqual(tuple(db.execute('SELECT state,reason FROM jobs').fetchone()),('pending','http_598'))
+            self.assertEqual(db.execute('SELECT count(*) FROM outputs').fetchone()[0],0)
+
+    def test_dart_importance_keeps_priority_no_send_and_rejects_missing_label(self):
+        self.runtime.settings['classify_importance']=True
+        event=self.dart(title='LG화학 - [첨부정정]공급계약')
+        with patch('pipeline_runtime.disclosure_rules.get_raw_text',return_value='거래 조건이 달라졌다. '*30):
+            payload=self.runtime.prepare_dart(event)
+        prompt=payload['request']['messages'][0]['content']
+        self.assertNotIn('SCORE:',prompt)
+        self.assertIn('정정 전후의 실제 차이',prompt)
+        payload['priority']=True
+        job=dict(source='dart',payload=payload)
+        for label in ('high','normal'):
+            result,outputs=self.runtime.parse(job,'계약 조건을 정정했다.\nIMPORTANCE: '+label)
+            self.assertEqual(outputs[0][1]['importance'],label)
+            self.assertNotIn('score',result)
+            self.assertNotIn('score',outputs[0][1])
+        result,outputs=self.runtime.parse(job,'NO_SEND')
+        self.assertEqual(result['decision'],'NO_SEND')
+        self.assertEqual([destination for destination,_ in outputs],['telegram:dart:caution'])
+        for invalid in ('본문만 있다.','본문\nSCORE: 8','본문\nIMPORTANCE: exclude','본문\nIMPORTANCE: high\nIMPORTANCE: normal','NO_SEND\nIMPORTANCE: normal'):
+            with self.assertRaises(ValueError):self.runtime.parse(job,invalid)
+
     def dart(self,identifier='20261123001',title='LG화학 - 공급계약'):
         return dict(source='dart',source_id=identifier,receipt_no=identifier,company='LG화학',title=title,
                     url='https://example.invalid/dart',published_at=None,published_at_original=None,

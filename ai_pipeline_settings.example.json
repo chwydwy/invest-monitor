@@ -1,5 +1,6 @@
 {
   "enabled": false,
+  "classify_importance": false,
   "ai_db": "/home/pi5dart/.local/state/invest-monitor/analysis.sqlite3",
   "dashboard_db": "/home/pi5dart/workspace/dashboard_outbox.sqlite3",
   "news_start_at": "REPLACE_WITH_ACTUAL_EXPANSION_START_ISO8601_WITH_OFFSET",
